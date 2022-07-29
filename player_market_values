@@ -1,0 +1,112 @@
+
+
+
+-- Check if #temp_games exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_games') IS NOT NULL
+	DROP TABLE #temp_games
+
+	SELECT nfl_game_key
+		,nfl_player_id
+		,club_id
+		,season
+		,season_type
+		,[week]
+		,status_roster_simple
+		,status_game_played
+		,active_game_count
+		,injury_status_week
+	INTO #temp_games
+	FROM Analytics.dbo.analysis_players_gameweek_status 
+	WHERE season >= 2004 
+		AND season_type in ('Reg', 'Post')
+	ORDER BY nfl_player_id
+		,nfl_game_week_begin
+
+
+
+--#Here GamesRostered is the total potential games rostered for that player when they are signed to a team and not a FA or on WAIVERS.
+
+-- Check if #temp_actives exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_actives') IS NOT NULL
+	DROP TABLE #temp_actives
+
+	SELECT nfl_player_id
+		,season
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') THEN 1 ELSE 0 END) AS active_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED') THEN 1 ELSE 0 END) AS started_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED','PLAYED','SUBSTITUTE') THEN 1 ELSE 0 END) AS played_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE','INJURED','RESERVE','PRACTICESQUAD','SUSPENDED') THEN 1 ELSE 0 END) AS rostered_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('SUSPENDED') THEN 1 ELSE 0 END) AS suspended_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('PUP') THEN 1 ELSE 0 END) AS pup_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND (status_roster_simple IN ('INJURED') OR (status_roster_simple IN ('INACTIVE') AND injury_status_week IS NOT NULL)) THEN 1 ELSE 0 END) AS injured_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('FREEAGENT') THEN 1 ELSE 0 END) AS free_agent_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('RETIRED') THEN 1 ELSE 0 END) AS retired_weeks
+	INTO #temp_actives
+	FROM #temp_games
+	GROUP BY nfl_player_id
+		,season
+
+
+
+-- Check if #temp_retireds exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_retireds') IS NOT NULL
+	DROP TABLE #temp_retireds
+
+	SELECT nfl_player_id
+		,season
+	INTO #temp_retireds
+	FROM #temp_actives
+	WHERE retired_weeks > 0
+		AND rostered_weeks = 0
+
+-- Check if #temp_free_agents exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_free_agents') IS NOT NULL
+	DROP TABLE #temp_free_agents
+
+	SELECT nfl_player_id
+		,season
+	INTO #temp_free_agents
+	FROM #temp_actives
+	WHERE free_agent_weeks > 0
+		AND rostered_weeks = 0
+
+
+
+-- Check if #temp_active_rates exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_active_rates') IS NOT NULL
+	DROP TABLE #temp_active_rates
+
+	SELECT ac.*
+		,active_weeks / NULLIF(rostered_weeks,0) AS active_rate
+		,played_weeks / NULLIF(rostered_weeks,0) AS played_rate
+		,started_weeks / NULLIF(rostered_weeks,0) AS started_rate
+		,(injured_weeks + pup_weeks) / NULLIF(rostered_weeks,0) AS injured_rate
+		,suspended_weeks / NULLIF(rostered_weeks,0) AS suspended_rate
+	INTO #temp_active_rates
+	FROM #temp_actives ac
+	WHERE NOT (rostered_weeks = 0 AND (retired_weeks > 0 OR free_agent_weeks > 0))
+
+-- Check if #temp_snaps exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_snaps') IS NOT NULL
+	DROP TABLE #temp_snaps
+
+	SELECT nfl_player_id
+		,season
+		,SUM(CASE WHEN season_type IN ('REG') THEN snap_count_all ELSE NULL END) AS snap_count_all
+		,SUM(CASE WHEN season_type IN ('REG') THEN snap_count_od ELSE NULL END) AS snap_count_od
+		,SUM(CASE WHEN season_type IN ('REG') THEN equivalent_games ELSE NULL END) AS equivalent_games
+		,SUM(CASE WHEN season_type IN ('REG') THEN equivalent_games_off_def ELSE NULL END) AS equivalent_games_off_def
+		,SUM(CASE WHEN season_type IN ('POST') THEN equivalent_games ELSE NULL END) AS equivalent_games_post
+		,SUM(CASE WHEN season_type IN ('POST') THEN equivalent_games_off_def ELSE NULL END) AS equivalent_games_off_def_post 
+	FROM Analytics.dbo.stage_players_season_playtime 
+	WHERE season >= 2004
+		AND season_type in ('REG', 'POST')
+	GROUP BY nfl_player_id
+		,season
+	HAVING SUM(CASE WHEN season_type IN ('REG') THEN snap_count_all ELSE NULL END) > 0
+
+
+	select *
+	from AnalyticsWork.dbo.player_market_value_monotone_20200818
+	where season = 2019
+	order by predicted_apy_percent desc
