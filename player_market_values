@@ -6,15 +6,417 @@
 
 This is the code for turning the player market values into model grades.
 
+
+EDGE:  jamie collins, ed oliver, solomon thomas, malik reed , Ogbonnia Okoronkwo
+rush/sam...if percenage is super close, default to scout pos fixes chickillo, bowser, floyd but watch for chandler jones 
+rush/mike...if mike/will snaps > rush or sam then take higher of mike/will
+pete robertson and jay elliott and stephone anthony not a lot of snaps
+shaq barrett, john simon, bud dupree have way more rush
+
+
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(1) (a)
+
+
+Pivot all the pos specs and critifcal factors to join to the modeling grade to look for weird ones.  Do this first so you can access it when you need it later.
+
+Start by getting season position because that's how you construct the evals for the reports.
+
+Defense and offense positions are kept in different tables, so do defense then append offense to it.
+
+OUTPUT TABLES:
+#temp_season_positions
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_season_positions exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_season_positions') IS NOT NULL
+	DROP TABLE #temp_season_positions
+
+	SELECT pl.id AS bane_player_id
+		,nfl_player_id
+		,season
+		,season_type_adjusted
+		,CASE WHEN position_blt IN ('IB','MIKE','WILL') AND po.translation = 'DS' THEN 'DS'
+			ELSE position_blt
+		END AS position_blt
+		,CASE WHEN position_blt IN ('NT','DT3T') THEN 'DT'
+			WHEN position_blt IN ('OB34','RUSH','SAM','DE43') THEN 'EDGE'
+			WHEN position_blt IN ('IB','MIKE','WILL') AND po.translation = 'DS' THEN 'DS'
+			WHEN position_blt IN ('IB','MIKE','WILL') THEN 'IB'
+			--WHEN position_blt IN ('CB','NB','FS','SS','DS') THEN 'DB'
+			WHEN position_blt IN ('CB','NB') THEN 'CB'
+			WHEN position_blt IN ('FS','SS','DS') THEN 'DS'
+			WHEN position_blt IN ('LOT','LOG','OC','ROG','ROT') THEN 'OL'
+			ELSE position_blt
+		END AS position_group_blt
+	INTO #temp_season_positions
+	FROM Analytics.dbo.analysis_players_season_position_defense de
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON de.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	INNER JOIN BaneProductionAnalytics.dbo.positions po
+		ON pl.position_id = po.id
+	WHERE po.[team] = 'defense'
+		AND defense_type = 'ALL'
+		AND snap_count_all > 0
+
+
+	INSERT INTO #temp_season_positions
+	SELECT pl.id AS bane_player_id
+		,nfl_player_id
+		,season
+		,season_type_adjusted
+		,position_blt
+		,CASE WHEN position_blt IN ('NT','DT3T') THEN 'DT'
+			WHEN position_blt IN ('OB34','RUSH','SAM','DE43') THEN 'EDGE'
+			WHEN position_blt IN ('IB','MIKE','WILL') AND po.translation = 'DS' THEN 'DS'
+			WHEN position_blt IN ('IB','MIKE','WILL') THEN 'IB'
+			--WHEN position_blt IN ('CB','NB','FS','SS','DS') THEN 'DB'
+			WHEN position_blt IN ('CB','NB') THEN 'CB'
+			WHEN position_blt IN ('FS','SS','DS') THEN 'DS'
+			WHEN position_blt IN ('LOT','LOG','OC','ROG','ROT') THEN 'OL'
+			ELSE position_blt
+		END AS position_group_blt
+	FROM Analytics.dbo.analysis_players_season_position_offense de
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON de.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	INNER JOIN BaneProductionAnalytics.dbo.positions po
+		ON pl.position_id = po.id
+	WHERE po.[team] = 'offense'
+		AND snap_count_all > 0
 
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-(1)
+(2)(a)
+
+Create the evaluations table.  It takes a few steps because the data that goes into evaluations lives in multiple different tables.
+
+First insert the regressed statistics into the evaluations table.
+
+OUTPUT TABLES:
+#temp_analytics_evaluations
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_analytics_evaluations, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_analytics_evaluations') IS NOT NULL
+	DROP TABLE #temp_analytics_evaluations
+
+	CREATE TABLE #temp_analytics_evaluations (
+		bane_player_id INT
+		,season INT
+		,season_type_adjusted NVARCHAR(7)
+		,skill_id INT
+		,skill_code NVARCHAR(50)
+		,grade_id INT
+		,grade NVARCHAR(5)
+	)
 
 
-Create the list of players to give a grade to.  Only players who appeared on a roster or practice squad get one.
+	INSERT INTO #temp_analytics_evaluations
+	SELECT bane_player_id
+		,rp.season
+		,rp.season_type_adjusted
+		,ma.skill_id
+		,sk.code AS skill_code
+		,gr.id AS grade_id
+		,gr.[value] AS grade
+	FROM #temp_season_positions rp
+	INNER JOIN Analytics.dbo.r_output_regressed_statistics rs
+		ON rp.nfl_player_id = rs.nfl_player_id
+		AND rp.season = rs.season
+		AND rp.season_type_adjusted = rs.season_type_adjusted
+		And rs.rolling_game_stats = 0
+	INNER JOIN Analytics.dbo.map_regressed_statistic_type ty
+		ON rs.statistic_id = ty.id
+	INNER JOIN BaneProductionAnalytics.dbo.grades gr
+		ON rs.statistic_grade = gr.[value]
+		AND gr.scale_id = 5
+		AND gr.active = 1
+	INNER JOIN Analytics.dbo.map_regressed_statistics_to_skill_ids ma
+		ON rs.statistic_id = ma.regressed_statistic_type_id
+		AND CASE WHEN rp.position_blt = 'DS' THEN 'SS' ELSE rp.position_blt END = ma.position_code
+	INNER JOIN Analytics.dbo.map_regressed_statistic_report_explanations ex
+		ON rs.statistic_id = ex.regressed_statistic_type_id
+	INNER JOIN BaneProductionAnalytics.dbo.skills sk
+		ON ma.skill_id = sk.id
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(2)(b)
+
+Insert endurance grade and strength/explosion grade (based on work rate) into the evaluations table.
+
+Skill IDs of 06/13/2020:
+1586 - endurance (A-END)
+1609 - strength/explosion (A-STR/EXPL)
+
+Strength/Explosion not ready yet as of 09/10/2020, taking it out.
+
+OUTPUT TABLES:
+#temp_analytics_evaluations
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	INSERT INTO #temp_analytics_evaluations 	
+	SELECT rp.bane_player_id
+		,rp.season
+		,rp.season_type_adjusted
+		,1586 AS skill_id
+		,'A-END' AS skill_code
+		,gr.id AS grade_id
+		,gr.[value] AS grade
+	FROM #temp_season_positions rp
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON rp.bane_player_id = pl.id
+		AND pl.is_deleted = 0
+	INNER JOIN Analytics.dbo.analysis_players_season_endurance_work_rates en
+		ON pl.id = en.bane_player_id
+		AND rp.season = en.season
+	INNER JOIN BaneProductionAnalytics.dbo.grades gr
+		ON en.endurance_grade = gr.[value]
+		AND gr.scale_id = 5
+		AND gr.active = 1
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(2)(c)
+
+Insert playing speed grade (based on projected 40) into the evaluations table.
+
+The projected 40s table doesn't have grades, so you have to turn the values into grades first.
+
+Skill IDs of 06/13/2020:
+1610 - playing speed (A-PLYSPD)
+
+OUTPUT TABLES:
+#temp_analytics_evaluations
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+	
+	-- Check if #temp_projected_forty_times, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_projected_forty_times') IS NOT NULL
+	DROP TABLE #temp_projected_forty_times
+
+	SELECT bane_player_id
+		,season
+		,AVG(projected_forty) AS projected_forty
+	INTO #temp_projected_forty_times
+	FROM Analytics.dbo.analysis_players_projected_forty_times
+	GROUP BY bane_player_id
+		,season
+
+
+	-- Check if #temp_projected_forties, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_projected_forties') IS NOT NULL
+	DROP TABLE #temp_projected_forties
+
+	SELECT po.bane_player_id
+		,po.season
+		,position_group_blt
+		,projected_forty
+		,RANK() OVER (PARTITION BY po.season, position_group_blt ORDER BY projected_forty DESC) AS projected_forty_rank
+	INTO #temp_projected_forties
+	FROM #temp_season_positions po
+	INNER JOIN #temp_projected_forty_times p40
+		ON po.bane_player_id = p40.bane_player_id
+		AND po.season = p40.season
+	WHERE po.season_type_adjusted = 'REGPOST'
+
+
+	-- Check if #temp_projected_forty_counts, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_projected_forty_counts') IS NOT NULL
+	DROP TABLE #temp_projected_forty_counts
+
+	SELECT season
+		,position_group_blt
+		,COUNT(*) AS position_count
+	INTO #temp_projected_forty_counts
+	FROM #temp_projected_forties
+	GROUP BY season
+		,position_group_blt
+
+
+	INSERT INTO #temp_analytics_evaluations 	
+	SELECT rp.bane_player_id
+		,rp.season
+		,rp.season_type_adjusted
+		,1610 AS skill_id
+		,'A-PLYSPD' AS skill_code
+		,gr.id AS grade_id
+		,gr.[value] AS grade
+	FROM #temp_season_positions rp
+	INNER JOIN #temp_projected_forties fo
+		ON rp.bane_player_id = fo.bane_player_id
+		AND rp.season = fo.season
+	INNER JOIN #temp_projected_forty_counts fc
+		ON fo.season = fc.season
+		AND fo.position_group_blt = fc.position_group_blt
+	INNER JOIN BaneProductionAnalytics.dbo.grades gr
+		ON (CASE WHEN (CAST(fo.projected_forty_rank AS FLOAT) - 1) / NULLIF(fc.position_count,0) >= 0.90 THEN 7
+				WHEN (CAST(fo.projected_forty_rank AS FLOAT) - 1) / NULLIF(fc.position_count,0) >= 0.75 THEN 6
+				WHEN (CAST(fo.projected_forty_rank AS FLOAT) - 1) / NULLIF(fc.position_count,0) >= 0.40 THEN 5
+				WHEN (CAST(fo.projected_forty_rank AS FLOAT) - 1) / NULLIF(fc.position_count,0) >= 0.15 THEN 4
+				ELSE 3 
+			END) = gr.[value]
+		AND gr.scale_id = 5
+		AND gr.active = 1
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(2)(d)
+
+Insert close on the ball/range (based on burst) into the evaluations table.
+
+The burst table doesn't have grades or percentiles, so you have to turn the values into grades first.
+
+Skill IDs of 06/13/2020:
+1615 - close on the ball/range (A-CLSONBALL/RNG)
+
+OUTPUT TABLES:
+#temp_analytics_evaluations
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+	
+	-- Check if #temp_ranked_bursts, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_ranked_bursts') IS NOT NULL
+	DROP TABLE #temp_ranked_bursts
+
+	SELECT po.bane_player_id
+		,po.season
+		,po.season_type_adjusted
+		,CASE WHEN position_blt IN ('CB','NB') THEN 'CB'
+			WHEN position_blt IN ('FS','SS','DS','DIME') THEN 'DS'
+		END AS position_group_blt
+		,AVG(bu.burst_speed) AS burst_average
+		,RANK() OVER (PARTITION BY po.season, po.season_type_adjusted, CASE WHEN position_blt IN ('CB','NB') THEN 'CB' WHEN position_blt IN ('FS','SS','DS','DIME') THEN 'DS' END ORDER BY AVG(bu.burst_speed)) AS burst_average_rank
+	INTO #temp_ranked_bursts
+	FROM #temp_season_positions po
+	INNER JOIN (SELECT pl.id AS bane_player_id, 2019 AS season, 'REGPOST' AS season_type_adjusted, bu2.*, RANK() OVER (PARTITION BY gsis_player_id ORDER BY burst_speed DESC) AS burst_rank FROM AnalyticsWork.dbo.sarah_safety_bursts_20200614 bu2 INNER JOIN BaneProductionAnalytics.dbo.players pl ON bu2.gsis_player_id = pl.nfl_id AND pl.is_deleted = 0) AS bu
+		ON po.bane_player_id = bu.bane_player_id
+		AND po.season = bu.season
+		AND po.season_type_adjusted = bu.season_type_adjusted
+		AND bu.burst_rank BETWEEN 3 AND 7
+	WHERE po.season_type_adjusted = 'REGPOST'
+		AND position_blt IN ('FS','SS','DS','DIME')
+	GROUP BY po.bane_player_id
+		,po.season
+		,po.season_type_adjusted
+		,CASE WHEN position_blt IN ('CB','NB') THEN 'CB'
+			WHEN position_blt IN ('FS','SS','DS','DIME') THEN 'DS'
+		END
+
+
+	-- Check if #temp_burst_counts, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_burst_counts') IS NOT NULL
+	DROP TABLE #temp_burst_counts
+
+	SELECT season
+		,season_type_adjusted
+		,position_group_blt
+		,COUNT(*) AS position_count
+	INTO #temp_burst_counts
+	FROM #temp_ranked_bursts
+	GROUP BY season
+		,season_type_adjusted
+		,position_group_blt
+
+
+	INSERT INTO #temp_analytics_evaluations 	
+	SELECT rp.bane_player_id
+		,rp.season
+		,rp.season_type_adjusted
+		,1615 AS skill_id
+		,'A-CLSONBALL/RNG' AS skill_code
+		,gr.id AS grade_id
+		,gr.[value] AS grade
+	FROM #temp_season_positions rp
+	INNER JOIN #temp_ranked_bursts bu
+		ON rp.bane_player_id = bu.bane_player_id
+		AND rp.season = bu.season
+		AND rp.season_type_adjusted = bu.season_type_adjusted
+	INNER JOIN #temp_burst_counts bc
+		ON bu.season = bc.season
+		AND bu.season_type_adjusted = bc.season_type_adjusted
+		AND bu.position_group_blt = bc.position_group_blt
+	INNER JOIN BaneProductionAnalytics.dbo.grades gr
+		ON (CASE WHEN (CAST(bu.burst_average_rank AS FLOAT) - 1) / NULLIF(bc.position_count,0) >= 0.90 THEN 7
+				WHEN (CAST(bu.burst_average_rank AS FLOAT) - 1) / NULLIF(bc.position_count,0) >= 0.75 THEN 6
+				WHEN (CAST(bu.burst_average_rank AS FLOAT) - 1) / NULLIF(bc.position_count,0) >= 0.40 THEN 5
+				WHEN (CAST(bu.burst_average_rank AS FLOAT) - 1) / NULLIF(bc.position_count,0) >= 0.15 THEN 4
+				ELSE 3 
+			END) = gr.[value]
+		AND gr.scale_id = 5
+		AND gr.active = 1
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(2)(e)
+
+Pivot all the evals
+
+OUTPUT TABLES:
+#temp_analytics_evaluations_pivot
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_analytics_evaluations_pivot, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_analytics_evaluations_pivot') IS NOT NULL
+	DROP TABLE #temp_analytics_evaluations_pivot
+
+   SELECT bane_player_id
+		,season
+		,season_type_adjusted
+		,[A-COV] AS coverage
+		,[A-OUTRUN] AS outside_run
+		,[A-BALLAWAR/PLAYTHEBALL] AS ball_aware
+		,[A-QBACC] AS accuracy
+		,[A-COVABIL/RANGE] AS lb_range
+		,[A-PLYMAK] AS playmaking
+		,[A-RB/S/FB] AS run_block_skill
+		,[A-RUNDEF/2GAP] AS run_def_dl
+		,[A-CLSONBALL/RNG] AS safety_range
+		,[A-RTERUN] AS route_run_rb
+		,[A-HNDS/BDYA] AS hands
+		,[A-TKL] AS tackling
+		,[A-PASS/R] AS pass_rush
+		,[A-SUS/RUNB] AS run_block_ol
+		,[A-POAR/SHEDB] AS run_def_lb
+		,[A-ROU] AS route_run_wr
+		,[A-RUNS/T] AS runst
+		,[A-RAC] AS run_after_catch
+		,[A-PLYSPD] AS play_speed
+		,[A-END] AS endurance
+		,[A-BLTZ/PASS/RUSH] AS blitz_pass_rush
+		,[A-PASS/BLK] AS pass_block
+		,[A-BLK/BLTZ] AS blitz_pickup
+	INTO #temp_analytics_evaluations_pivot
+	FROM (
+		SELECT bane_player_id
+			,season
+			,season_type_adjusted
+			,skill_code
+			,grade
+	FROM #temp_analytics_evaluations WHERE skill_code IN ('A-COV','A-OUTRUN','A-BALLAWAR/PLAYTHEBALL','A-QBACC','A-COVABIL/RANGE','A-PLYMAK','A-RB/S/FB','A-RUNDEF/2GAP','A-CLSONBALL/RNG','A-RTERUN','A-HNDS/BDYA','A-TKL','A-PASS/R','A-SUS/RUNB','A-POAR/SHEDB','A-ROU','A-RUNS/T','A-RAC','A-PLYSPD','A-END','A-BLTZ/PASS/RUSH','A-PASS/BLK','A-BLK/BLTZ')) up
+    PIVOT (MAX([grade]) FOR skill_code IN ([A-COV],[A-OUTRUN],[A-BALLAWAR/PLAYTHEBALL],[A-QBACC],[A-COVABIL/RANGE],[A-PLYMAK],[A-RB/S/FB],[A-RUNDEF/2GAP],[A-CLSONBALL/RNG],[A-RTERUN],[A-HNDS/BDYA],[A-TKL],[A-PASS/R],[A-SUS/RUNB],[A-POAR/SHEDB],[A-ROU],[A-RUNS/T],[A-RAC],[A-PLYSPD],[A-END],[A-BLTZ/PASS/RUSH],[A-PASS/BLK],[A-BLK/BLTZ])) AS pvt
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(3)
+
+
+Create the list of players to give a grade to.  Only players who played at least 100 snaps get one.
 
 Use this as your universe for grade distrubutions too.
 
@@ -106,7 +508,7 @@ DROP TABLE #temp_grades_scouts
 		,CASE WHEN MONTH(re.created_at) < 8 OR (MONTH(re.created_at) = 8 AND DAY(re.created_at) < 15) THEN YEAR(re.created_at)-1 
 			ELSE YEAR(re.created_at) END AS report_season
 		--,ISNULL(rp.translation,po.translation) AS position_report
-		,po.translation AS position_report
+		,CASE WHEN po.translation = 'DE' AND po.code <> 'DE5T' THEN 'OB' ELSE po.translation END AS position_report
 		,CAST(gr.value AS FLOAT) AS grade_bucket       
 	INTO #temp_grades_scouts
 	FROM [BaneProductionAnalytics].[dbo].[reports] re
@@ -140,18 +542,6 @@ DROP TABLE #temp_grades_scouts
 
 Find the positional grade distribution.
 
-As of 09/2020, manually set these thresholds based on looking at the data:
-
-8.0 = Top 99%
-7.0 = Top 95%
-6.5 = Top 90%
-6.3 = Top 80%
-6.0 = Top 70%
-5.9 = Top 50%
-5.8 = Top 30%
-5.7 = Top 15%
-5.6 = players who weren't rostered for a game
-
 
 OUTPUT TABLES:
 #temp_grade_percentiles
@@ -179,7 +569,6 @@ IF OBJECT_ID('tempdb..#temp_active_grades') IS NOT NULL
 		,season
 		,report_season
 		,position_report
-
 
 
 -- Check if #temp_grade_percentiles exists, if it does drop it
@@ -212,7 +601,7 @@ IF OBJECT_ID('tempdb..#temp_grade_percentiles') IS NOT NULL
 		,(COUNT(*) - CAST(SUM(CASE WHEN grade_bucket >= 5.7 THEN 1 ELSE 0 END) AS FLOAT)) / COUNT(*) AS percentile_57
 		,(COUNT(*) - CAST(SUM(CASE WHEN grade_bucket >= 5.6 THEN 1 ELSE 0 END) AS FLOAT)) / COUNT(*) AS percentile_56
 		,(COUNT(*) - CAST(SUM(CASE WHEN grade_bucket >= 5.4 THEN 1 ELSE 0 END) AS FLOAT)) / COUNT(*) AS percentile_54*/
-	--INTO #temp_grade_percentiles
+	INTO #temp_grade_percentiles
 	FROM #temp_active_grades
 	WHERE 1 = 1
 		AND report_season >= 2017 AND report_season < 2020
@@ -255,11 +644,16 @@ IF OBJECT_ID('tempdb..#temp_model_predictions') IS NOT NULL
 		,on_53_weeks
 		,CASE WHEN po.team = 'defense' THEN 
 			CASE WHEN po.translation = 'DS' AND ISNULL(de.position_blt,po.translation) IN ('SAM','MIKE','WILL') THEN 'DS'
+				WHEN ISNULL(de.position_blt,po.translation) IN ('RUSH','SAM','OB34','DE43','OB') AND po.code IN ('WILL','MIKE','IB') THEN 'IB'
+				WHEN ISNULL(de.position_blt,po.translation) IN ('RUSH','SAM','OB34','DE43','OB') AND po.code IN ('CB','NB') THEN 'CB'
 				WHEN ISNULL(de.position_blt,po.translation) IN ('RUSH','SAM','OB34','DE43','OB') THEN 'EDGE'
-				WHEN ISNULL(de.position_blt,po.translation) IN ('IB','MIKE','WILL') THEN 'IB'
+				WHEN ISNULL(de.position_blt,po.translation) IN ('IB','MIKE','WILL') AND po.code NOT IN ('CB','NB') THEN 'IB'
+				WHEN ISNULL(de.position_blt,po.translation) IN ('IB','MIKE','WILL') AND po.code IN ('CB','NB') THEN 'CB'
 				WHEN ISNULL(de.position_blt,po.translation) IN ('NT','DT3T') THEN 'DT'
 				WHEN ISNULL(de.position_blt,po.translation) IN ('SS','FS') THEN 'DS'
 				WHEN ISNULL(de.position_blt,po.translation) IN ('DC','CB','NB') THEN 'CB'
+				WHEN ISNULL(de.position_blt,po.translation) = 'DE5T' AND po.code = 'DE5T' THEN 'DT'
+				WHEN ISNULL(de.position_blt,po.translation) = 'DE5T' THEN 'EDGE'
 				ELSE ISNULL(de.position_blt,po.translation)
 			END
 		 WHEN po.team = 'offense' THEN
@@ -270,8 +664,9 @@ IF OBJECT_ID('tempdb..#temp_model_predictions') IS NOT NULL
 				ELSE ISNULL(ofp.position_blt,po.translation)
 			END
 		END AS position_blt
-		,mv.predicted_apy_percent
-		,mv.predicted_apy_percent * sc.league_salary_cap AS predicted_apy_dollars
+		,CASE WHEN ISNULL(ofp.position_blt,po.translation) = 'TE' THEN mv.predicted_apy_position_swap ELSE mv.predicted_apy_percent END AS predicted_apy_percent
+		,CASE WHEN ISNULL(ofp.position_blt,po.translation) = 'TE' THEN mv.predicted_apy_position_swap ELSE mv.predicted_apy_percent END * sc.league_salary_cap AS predicted_apy_dollars
+		,po.code
 	INTO #temp_model_predictions
 	FROM #temp_actives ac
 	INNER JOIN [Analytics].[dbo].[analysis_players_market_values_gradeless] mv
@@ -343,272 +738,778 @@ OUTPUT TABLES:
 IF OBJECT_ID('tempdb..#temp_pro_model_grades') IS NOT NULL
 	DROP TABLE #temp_pro_model_grades
 	
-	SELECT bane_player_id
+	SELECT ra.bane_player_id
 		,nfl_player_id
 		,player
-		,season
+		,DATEDIFF(DD,birth_date,GETDATE()) / 365.25 AS age
+		,ra.season
 		,position_blt
 		,predicted_apy_percent
 		,predicted_apy_percentile
 		,predicted_apy_rank
+		,code
 		,CASE WHEN position_blt = 'QB' THEN
-			CASE WHEN predicted_apy_rank <= 2 THEN '8.0'
-				WHEN predicted_apy_rank <= 6 THEN '7.0'
-				WHEN predicted_apy_rank <= 12 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
-				WHEN predicted_apy_rank <= 12 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
-				WHEN predicted_apy_rank <= 20 THEN '6.3'
-				WHEN predicted_apy_rank <= 30 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
-				WHEN predicted_apy_rank <= 30 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
-				WHEN predicted_apy_rank <= 40 THEN '5.9'
-				WHEN predicted_apy_percent >= 0.017 AND on_53_weeks = 0 THEN '5.7'
-				WHEN predicted_apy_percent >= 0.017 THEN '5.8'
+			CASE WHEN predicted_apy_percent >= 0.200 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.150 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.130 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.130 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.100 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.020 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.014 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.014 THEN '5.8'
 				WHEN on_53_weeks = 0 THEN '5.6'
-				WHEN predicted_apy_percent >= 0.0162 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.010 THEN '5.7'
 				ELSE '5.6'
 			END
 		WHEN position_blt = 'RB' THEN
-			CASE WHEN predicted_apy_percent >= 0.09 THEN '8.0'
-				WHEN predicted_apy_percent >= 0.07 THEN '7.0'
+			CASE WHEN predicted_apy_percent >= 0.090 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.070 THEN '7.0'
 				WHEN predicted_apy_percent >= 0.055 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
 				WHEN predicted_apy_percent >= 0.055 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
-				WHEN predicted_apy_percent >= 0.03 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.027 THEN '6.3'
 				WHEN predicted_apy_percent >= 0.015 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
 				WHEN predicted_apy_percent >= 0.015 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
-				WHEN predicted_apy_percent >= 0.011 THEN '5.9'
-				WHEN predicted_apy_percent >= 0.0098 AND on_53_weeks = 0 THEN '5.7'
-				WHEN predicted_apy_percent >= 0.0098 THEN '5.8'
+				WHEN predicted_apy_percent >= 0.010 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.008 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.008 THEN '5.8'
 				WHEN on_53_weeks = 0 THEN '5.6'
-				WHEN predicted_apy_percent >= 0.008 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.007 THEN '5.7'
 				ELSE '5.6'
 			END
-		WHEN position_blt = 'WR' THEN
-			CASE WHEN predicted_apy_percent >= 0.084 THEN '8.0'
-				WHEN predicted_apy_percent >= 0.075 THEN '7.0'
-				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
-				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
-				WHEN predicted_apy_percent >= 0.03 THEN '6.3'
+		WHEN position_blt IN  ('WIDE','SLOT') THEN
+			CASE WHEN predicted_apy_percent >= 0.080 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.069 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.055 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.055 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.030 THEN '6.3'
 				WHEN predicted_apy_percent >= 0.017 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
 				WHEN predicted_apy_percent >= 0.017 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
-				WHEN predicted_apy_percent >= 0.01 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.010 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt IN  ('TE') THEN
+			CASE WHEN predicted_apy_percent >= 0.070 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.060 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.050 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.050 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.026 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.016 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.016 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.010 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt IN  ('OT') THEN
+			CASE WHEN predicted_apy_percent >= 0.085 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.080 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.040 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.011 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.011 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.005 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.004 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt IN  ('OG') THEN
+			CASE WHEN predicted_apy_percent >= 0.065 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.060 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.050 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.050 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.035 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.012 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.012 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.005 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.004 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt IN  ('OC') THEN
+			CASE WHEN predicted_apy_percent >= 0.080 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.070 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.057 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.057 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.035 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.012 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.012 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.007 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.005 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.004 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt = 'DT' THEN
+			CASE WHEN predicted_apy_percent >= 0.15 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.100 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.032 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.026 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.026 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.012 THEN '5.9'
 				WHEN predicted_apy_percent >= 0.007 AND on_53_weeks = 0 THEN '5.7'
 				WHEN predicted_apy_percent >= 0.007 THEN '5.8'
 				WHEN on_53_weeks = 0 THEN '5.6'
-				WHEN predicted_apy_percent >= 0.006 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
 				ELSE '5.6'
 			END
 		WHEN position_blt = 'EDGE' THEN
-			CASE WHEN predicted_apy_rank <= 2 THEN '8.0'
-				WHEN predicted_apy_rank <= 6 THEN '7.0'
-				WHEN predicted_apy_rank <= 14 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
-				WHEN predicted_apy_rank <= 14 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
-				WHEN predicted_apy_rank <= 30 THEN '6.3'
-				WHEN predicted_apy_rank <= 60 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
-				WHEN predicted_apy_rank <= 60 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
-				WHEN predicted_apy_percent >= 0.017 THEN '5.9'
-				WHEN predicted_apy_percent >= 0.012 AND on_53_weeks = 0 THEN '5.7'
-				WHEN predicted_apy_percent >= 0.012 THEN '5.8'
+			CASE WHEN predicted_apy_percent >= 0.110 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.100 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.070 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.040 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.015 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.015 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.008 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
 				WHEN on_53_weeks = 0 THEN '5.6'
-				WHEN predicted_apy_percent >= 0.008 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt = 'IB' THEN
+			CASE WHEN predicted_apy_percent >= 0.080 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.054 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.045 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.045 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.030 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.013 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.013 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.008 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
+				ELSE '5.6'
+			END
+		WHEN position_blt = 'CB' THEN
+			CASE WHEN predicted_apy_percent >= 0.10 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.075 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.060 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.035 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.026 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.026 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.010 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
+				WHEN on_53_weeks = 0 THEN '5.6'
+				WHEN predicted_apy_percent >= 0.004 THEN '5.7'
 				ELSE '5.6'
 			END
 		WHEN position_blt = 'DS' THEN
-			CASE WHEN predicted_apy_rank <= 2 THEN '8.0'
-				WHEN predicted_apy_rank <= 6 THEN '7.0'
-				WHEN predicted_apy_rank <= 14 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
-				WHEN predicted_apy_rank <= 14 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
-				WHEN predicted_apy_rank <= 30 THEN '6.3'
-				WHEN predicted_apy_percent >= 0.016 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
-				WHEN predicted_apy_percent >= 0.016 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
-				WHEN predicted_apy_percent >= 0.0105 THEN '5.9'
-				WHEN predicted_apy_percent >= 0.007 AND on_53_weeks = 0 THEN '5.7'
-				WHEN predicted_apy_percent >= 0.007 THEN '5.8'
+			CASE WHEN predicted_apy_percent >= 0.070 THEN '8.0'
+				WHEN predicted_apy_percent >= 0.060 THEN '7.0'
+				WHEN predicted_apy_percent >= 0.045 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 29 THEN '6.7'
+				WHEN predicted_apy_percent >= 0.045 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 29 THEN '6.9'
+				WHEN predicted_apy_percent >= 0.032 THEN '6.3'
+				WHEN predicted_apy_percent >= 0.020 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 >= 27 THEN '6.1'
+				WHEN predicted_apy_percent >= 0.020 AND DATEDIFF(DD,birth_date,GETDATE()) / 365.2425 < 27 THEN '6.0'
+				WHEN predicted_apy_percent >= 0.009 THEN '5.9'
+				WHEN predicted_apy_percent >= 0.006 AND on_53_weeks = 0 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.006 THEN '5.8'
 				WHEN on_53_weeks = 0 THEN '5.6'
-				WHEN predicted_apy_percent >= 0.0059 THEN '5.7'
+				WHEN predicted_apy_percent >= 0.005 THEN '5.7'
 				ELSE '5.6'
 			END
 		END AS pro_model_grade
+	--DB
+		,coverage
+		,ball_aware
+		,ISNULL(tackling,runst) AS tackling
+		,safety_range
+		,play_speed
+		,endurance
+		/*
+	--IB
+		,tackling
+		,lb_range
+		,isnull(run_def_dl,run_def_lb) AS run_def
+		,blitz_pass_rush
+		,play_speed
+		,endurance
+	--DL/EDGE
+		,pass_rush
+		,tackling
+		,isnull(run_def_dl,run_def_lb) AS run_def
+		,play_speed
+		,endurance
+	--OL
+		,pass_block
+		,run_block_ol
+		,play_speed
+		,endurance
+	--WR/TE
+		,route_run_wr
+		,play_speed
+		,hands
+		,run_after_catch
+		,run_block_skill
+		,endurance
+	--RB
+		,outside_run
+		,route_run_rb
+		,play_speed
+		,blitz_pickup
+		,endurance
+	--QB
+		,playmaking
+		,accuracy
+		,play_speed
+		,endurance
+		*/
 	INTO #temp_pro_model_grades
-	FROM #temp_model_prediction_ranks
-	WHERE position_blt IN ('QB','EDGE','DS','RB','SLOT','WIDE')
+	FROM #temp_model_prediction_ranks ra
+	LEFT JOIN #temp_analytics_evaluations_pivot pv
+		ON ra.bane_player_id = pv.bane_player_id
+		AND ra.season = pv.season
+		AND pv.season_type_adjusted = 'REGPOST'
 
--- Manually update a few based on pro sequence
-
---QB Rivers
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.7
-WHERE nfl_player_id = 28956
-
---QB Rodgers
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.7
-WHERE nfl_player_id = 29851
-
---QB Wilson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 8.0
-WHERE nfl_player_id = 38605
-
---OB Jones
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 38551
-
---OB Bosa
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 7.0
-WHERE nfl_player_id = 47785
-
---OB Mack
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 41231
-
---OB Watt
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 7.0
-WHERE nfl_player_id = 44842
-
---OB Bennett
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.1
-WHERE nfl_player_id = 34836
-
---OB Collins
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 40000
-
---OB Lawrence
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 41263
-
---OB Curry
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 5.9
-WHERE nfl_player_id = 38589
-
---OB Hunter
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 8.0
-WHERE nfl_player_id = 42431
-
---DS Thomas
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.7
-WHERE nfl_player_id = 35453
-
---DS Simmons
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 8.0
-WHERE nfl_player_id = 43387
-
---DS Jackson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 44925
-
---DS Byard
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 7.0
-WHERE nfl_player_id = 43353
-
---DS Johnson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 44903
-
---DS Ward
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 41256
-
---DS Jefferson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.1
-WHERE nfl_player_id = 40737
-
---DS Anthony Harris
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 42830
-
---DS Reid
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 46137
-
---DS Erik Harris
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 39908
-
---RB Le'veon Bell
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 39996
-
---RB Alvin Kamara
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 7.0
-WHERE nfl_player_id = 44879
-
---RB Austin Ekeler
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 45573
-
---RB Josh Jacobs
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 47807
-
---RB Duke Johnson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 42420
-
---FB Kyle Juszczyk
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.3
-WHERE nfl_player_id = 40078
-
---RB Dalvin Cook
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 44853
-
---RB Ezekiel Elliott
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 43293
-
---RB Nick Chubb
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.9
-WHERE nfl_player_id = 46104
-
---RB David Johnson
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 5.9
-WHERE nfl_player_id = 42429
-
---RB Gus Edwards
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.0
-WHERE nfl_player_id = 46437
-
---RB Tony Pollard
-UPDATE #temp_pro_model_grades
-SET pro_model_grade = 6.0
-WHERE nfl_player_id = 47911
-
-
+/*
 SELECT *
 FROM #temp_pro_model_grades
-WHERE position_blt IN ('SLOT','WIDE')
+WHERE position_blt IN ('DS')
 ORDER BY predicted_apy_percent DESC
+*/
 
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(6)
+
+
+Manually update some grades on pro sequence
+
+OUTPUT TABLES:
+#temp_pro_model_grades
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+/*-------------
+QB...need at least one 7 for a 6.7 and up
+--------------*/
+
+--Russell Wilson
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 8.0
+WHERE nfl_player_id IN (38605)
+
+--Dak Prescott
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (43424)
+
+--Aaron Rodgers
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (29851)
+
+--Phil Rivers, Carson Wentz, Matt Stafford, Tom Brady, Jimmy Garoppolo
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (28956,43291,34452,25511,41291)
+
+--Teddy Bridgewater
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (41258)
+
+--Daniel Jones
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (47789)
+
+
+/*-------------
+RB...at least one 7 to be a 7.0, at least one 6 to be a 6.3
+--------------*/
+
+--Alvin Kamara
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (44879)
+
+--Dalvin Cook, Nick Chubb, Saquon Barkley, Josh Jacobs, Austin Ekeler
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (44853,46104,46071,47807,45573)
+
+--Ezekiel Elliott, Kyle Juszczyk, Raheem Mostert, David Montgomery
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (43293,40078,42718,47856)
+
+--Leveon Bell, Derrick Henry, Leonard Fournette, Devonta Freeman, Kenyan Drake, Marlon Mack
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (39996,43334,44816,41332,43362,44956)
+
+--Pat Ricard, Tony Pollard
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (45268,46437,47911)
+
+--David Johnson, Jamaal Williams, Tevin Coleman, Frank Gore, Royce Freeman, Dion Lewis 3 outside run
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (42429,44947,42416,29892,46140,37224)
+
+--Travis Homer 7 play speed
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id = 47987
+
+
+/*-------------
+WR
+--------------*/
+
+--Chris Godwin
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 8.0
+WHERE nfl_player_id in (44896)
+
+--Mike Evans, Julio Jones, Copper Kupp
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id in (37079,41233,44852)
+
+--Odell Beckham, Allen Robinson, Michael Gallup, Deebo Samuel, AJ Brown
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id in (41238,41290,46150,47819,47834)
+
+--Robert Woods
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id in (39989)
+
+--Marvin Jones, Juju Smith-Schuster, Sterling Shepard, Marquise Brown, Randall Cobb, Hunter Renfrow, Mecole Hardman
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id in (38696,44874,43329,47808,37139,47932,47839)
+
+--Taylor Gabriel , Alshon Jeffery, Jamison Crowder, Nelson Agholor, Paul Richardson, Keelan Cole
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id in (42016,38575,42448,42363,41274,45555)
+
+--Curtis Samuel, Auden Tate, Corey Davis, Darius Slayton, Preston Williams, Parris Campbell, Jakeem Grant, Taysom Hill, Malik Turner
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id in (44852,46322,44817,47954,48480,47842,43475,45244,46998)
+
+--Cordarrelle Patteron, N'Keal Harry, Travis Benjamin, Justin Hardy, Allen Lazard, Pharoh Cooper, Vyncint Smith
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id in (39975,47815,38630,42450,46705,43406,46815,46815)
+
+--Jairus Wright, Robert Foster, Trent Sherfield, DaeSean Hamilson
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id in (38648,46694,46671,46182)
+
+
+/*-------------
+TE
+--------------*/
+
+--Darren Waller
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (42547)
+
+--Austin Hooper, Mark Andrews, Tyler Higbee, Dallas Goedert
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (43370,46155,43399,46118)
+
+--Zach Ertz
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (39983)
+
+--Hunter Henry, Gerald Everett, Jimmy Graham, Jonnu Smith, Hayden Hurtst, Blake Jarwin, Noah Fant
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (43324, 44856, 35534, 44912, 46094, 45532, 47803)
+
+--Vernon Davis, Jason Witten, Darren Fells, Delanie Walker, Maxx Williams
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (30820, 28103, 39907, 30990, 42398)
+
+--Dawson Knox
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (47879)
+
+--Vance McDonald, Trey Burton, Seth Devalve, Tyler Kroft, Durham Smythe, Trevon Wesco, Pharaoh Brown
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (40003, 41548, 43427, 42428, 46192, 47904, 45339)
+
+--Lee Smith, Dalton Schultz, Demetrius Harris, JP Holtz, Johnny Mundt, Adam Shaheen
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (37234, 46206, 40615, 44009, 45094, 44857)
+
+
+/*-------------
+OT
+--------------*/
+
+--Lane Johnson, Laremy Tunsil, Ronnie Stanley
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (39950,43302,43295)
+
+--Taylor Lewan, Jake Matthews
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (41237,41232)
+
+--Terron Armstead
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (40023)
+
+--Tyron Smith, Brian O'Neill
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (37082,46131)
+
+--Charles Leno, Rob Havenstein, Justin Murray, Bobby Massie
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (41475,42400,43648,38642)
+
+--Ricky Wagner, Chris Hubbard, nate Solder, Kaleb McGary, Dennis Kelly, Cam Robinson, Julie'n Davenport
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (40116, 40416,37090,47814,38683,44846,44943)
+
+--Greg Little, Andre Dillard, Trent SCott, Brandon Parker, Geron Christian, J'Marcus Webb, Cameron Fleming, Jake Rodgers, GEron Christian, Josh Wells, Dennis Daley, Cornelius Lucas
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (47820,47805,46755,46134,46143,35657,41369,42568,46143,41667,47995,41563)
+
+
+/*-------------
+OG
+--------------*/
+
+--Zack Martin, Quenton Nelson, Marshal Yanda
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (41242,46075,32279)
+
+--Brandon Scherff, Joel Bitonio, Joe Thuney
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (42348,41264,43367)
+
+--Richie Incognito, Rodger Saffold
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (29908,35472)
+
+--Shaq Mason, James Daniels, Justin Pugh, Dalton Risner
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (42474,46108,39965,47824)
+
+--Kyle Long, Ramon Foster, Andrus Peat, Andrew Wylie
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (39966,34774,42356,45695)
+
+--Kelechi Osemele, Lane Taylor, CHris Lindstrom, Joe Noteboom, Zach Fulton, Lane Taylor, Wes Schweitzer, Kenny Wiggins, Austin Corbett, Stefen Wisniewski
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (38590,40733,47797,46158,41422,40733,43484,37740,46102,37123)
+
+--James Carpenter, Daryl Williams, Forrest Lamp, Will Richardson, Jamil Demby, Tom Compton, Wes Martin, Danny Isidora, Ted Larsen, Michael Dieter, Billy Turner, Billy PRice, Eric Kush, Michael JOrdan
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (37098,42445,46198,44850,44850,46261,38723,47914,44993,35644,47861,41296,46090,40118,47919)
+
+
+/*-------------
+OC
+--------------*/
+
+--Frank Ragnow, Brandon Linder, Erik McCoy
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (46089,41322,47831)
+
+--Alex Mack, Nick Martin, Austin Reiter
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (34472,43339,42565)
+
+--Maurkice Pouncey, AQ Shipley
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (35457,34677)
+
+--Austin Blythe, Matt Paradis, Mike Pouncey, Garrett Bradbury, Andre James, Patrick Lucas, James Ferentz
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (43537,41436,37088,47801,48235,44068,41069)
+
+
+/*-------------
+DT
+--------------*/
+
+--Cam Heyward
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 8.0
+WHERE nfl_player_id = 37104
+
+--Chris Jones
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (43326)
+
+--Jonathan Allen, DJ Reader, Javon Hargrave
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (44829,43455,43378)
+
+--Fletcher Cox, Geno Atkins, Stephon Tuitt, Jurrell Casey, Ed Oliver, Shelby Harris, Danny Shelton, Lawrence Guy, Jeffery Simmons, Deatrich Wise
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (38542,35559,41275,37152,47792,41464,42355,37308,47802,44944)
+
+--Akiem Hicks, Larru Ogunjobi, Denico Autry, Jarran Reed, Corey Peters, Janathan Hankins, Marcell Dareus, Tyson Alualu, Mike Purcell
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (38619,44877,42031,43338,35522,39997,37076,35449,40347)
+
+--Maliek Collins, DaRon Payne, Sheldon Rankins, Dexter Lawrence, AShawn Robinson, Quinton Jefferson, Adam Butler, Roy Robertson, Chris Wormley, William Gholston
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (43356,46082,43301,47800,43335,43436,45274,43787,44886,40074)
+
+--DaShawn Hand, Andrew Billings, Star Lotuleiei, Vernon Butler, Demarcus Walker, Sebastian Joseph-Day, Austin Johnson, Carlos Watkins, Mike Pennell, Khalen Saunders, Brent Urban
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (46183,43411,39960,43319,62923,81225,43332,44955,41595,47867,41363)
+
+--Zach Allen, Hassan Ridgeway, Kingsley Keke, Akeem Spence
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (47848,43405,47933,40048)
+
+
+/*-------------
+DE - LOOK INTO DEATRICH WISE AND TREY FLOWERS AND Kyle Van Noy
+--------------*/
+
+/*-------------
+EDGE
+--------------*/
+
+--Cameron Jordan, Nick Bosa
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (37097,47785)
+
+--Arik Armstead, Trey Flowers
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (42360,42444)
+
+--Chandler Jones, Melvin Ingram, Carlos Dunlap, Kyle Van Noy, Calais Campbell
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (38551,38548,35493,41269,33131)
+
+--Everson Griffen, Preston Smith, Frank Clark, Markus Golden, Uchenna Nwosu
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (35539,42381,42406,42401,46117)
+
+--Ryan Kerrigan, WHitney Mercilus, Clay Matthews, Jerry Hughes, Leonard Floyd, Trent Murphy, Dee Ford
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (37089,38556,34477,35470,43298,41276,41249)
+
+--Carl Lawson, Tarell Basham, Kyle Phillips
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (44929,44892,48654)
+
+--Ezekiel Ansah, Christian Jones, Solomon Thomas, Kyler Fackrell, Tanoh Kpassagnon, Allen Bailey, Cassius Marsh
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (39951,41947,44815,43377,44871,37161,41337)
+
+--Andrew Van Ginkel, Shaquem Griffin, Dorance Armstrong, Tyquan Lewis, Ifeadi Odenigbo, Arden Key, Ben Banogu, Isaac Rochell, Ogbonnia Okoronkwo
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (47934,46210,46185,46133,45033,46156,47832,45038,46229)
+
+
+/*-------------
+IB
+--------------*/
+
+--Demario Davis
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (38607)
+
+--Zach Cunningham
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (44869)
+
+--Dont'a Hightower
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (38555)
+
+--Fred Warner, Jordan Hicks, CJ Mosley, Deion Jones, Blake Martinez
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (46139,42427,41243,43341,43420)
+
+--Nigel Bradham, Kwon Alexander, Mack Wilson, Mychal Kendricks, Christian Kirksey, Denzel Perryman, Kamalei Correa, Kevin Pierre-Louis
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (38635,42467,47938,38576,41300,42391,43331,41361)
+
+--Shaun Dion Hamilton, Germaine Pratt, Foyesade Oluokun
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (46266,47855,46269)
+
+--Neville Hewitt, AJ Klein, Quincy Williams, Kamu Grugier-Hill, Alec Ogletree, Najee Goode, Vontaze Burfict, Sam Eguavoen, Dylan Cole, BJ Goodson
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (42771,40096,47881,43497,39976,38670,38856,44174,45643,43398)
+
+--Darron Lee, Josey Jewell, Joe Thomas, Kentrell Brothers, Wiill Compton
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (43309,46175,41599,43449,40326)
+
+
+/*-------------
+DC
+--------------*/
+
+--Marcus Peters
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (42361)
+
+--Carlton Davis
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (46132)
+
+--Joe Haden
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (35446)
+
+--Kyle Fuller, Desmond Trufant, AJ Bouye, Darius Slay, Denzel Ward, Gareon Conley, Janoris Jenkins
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (39968,39984,46073,41240,39968,40688,44836,38569)
+
+--Logan Ryan, Wiliam Jackson, Donte Jackson, Justin Coleman, Bashaud Breeland, Jason McCourty, Troy Hill, Tramaine Brock
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (40031,43313,42827,41331,34654,42816,35888)
+
+--Donte Jackson, Ronald Darby, Jalen Mills, Kendall Sheffield
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (46124,42393,43522,47894)
+
+--Avonte Maddox, Brian Poole, Darqueze Dennard, Jonathan Jones, Deandre Baker, Buster Skrine, Lamarcus Joyner
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (46194,41250,43716,43700,47813,37212,41270,42992)
+
+
+/*-------------
+DS
+--------------*/
+
+--Justin Simmons
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 8.0
+WHERE nfl_player_id IN (43387)
+
+--Kevin Byard
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 7.0
+WHERE nfl_player_id IN (43353)
+
+--Tyrann Mathieu, Marcus Williams, Marcus Maye
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.9
+WHERE nfl_player_id IN (40017,44854,44851)
+
+--Earl Thomas, Devin McCourty, Jimmie Ward
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.7
+WHERE nfl_player_id IN (35453,35466,41256)
+
+--Derwin James, Adrian Amos, Eric Weddle, Xavier Woods, Jessie Bates, Anthony Harris, Rodney McLeod, Erik Harris, Tre Boston, Rayshawn Jenkins
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.3
+WHERE nfl_player_id IN (46086,42485,32230,45004,46123,42830,38843,39908,41357,44926)
+
+--Patrick Chung
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.1
+WHERE nfl_player_id IN (34485)
+
+--Keanu Neal
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 6.0
+WHERE nfl_player_id IN (43306)
+
+--Tony Jefferson, Reshad Jones, Adrian Phillips, Desmond King, Steven Parker, Juston Burris, Andrew Adams
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.9
+WHERE nfl_player_id IN (40737,35602,42116,44964,46916,43407,43757)
+
+--Ibraheim Campbell, Eric Murray, Troy Apke
+UPDATE #temp_pro_model_grades
+SET pro_model_grade = 5.8
+WHERE nfl_player_id IN (42458,43395,46178)
+
+/*
+SELECT *
+FROM #temp_pro_model_grades
+WHERE position_blt IN ('QB')
+ORDER BY pro_model_grade DESC
+	,predicted_apy_percent DESC
+*/
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -622,10 +1523,8 @@ Analytics.dbo.analysis_players_pro_model_grades
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
 
---DELETE FROM Analytics.dbo.analysis_players_pro_model_grades
+--DELETE FROM Analytics.dbo.analysis_players_pro_model_grades WHERE 1=1
 --INSERT INTO Analytics.dbo.analysis_players_pro_model_grades
-
-
 	SELECT mg.bane_player_id
 		,mg.nfl_player_id
 		,mg.season
