@@ -241,6 +241,7 @@ IF OBJECT_ID('tempdb..#temp_contracts_no_renegs') IS NOT NULL
 		,signing_date_next_contract
 		,signing_type
 		,true_apy_percent_of_cap
+		,true_average_per_year
 		,CASE WHEN signing_type IN ('Extension') AND MONTH(signing_date) >= 10 THEN first_contract_year + 1 ELSE first_contract_year END AS first_contract_year
 	INTO #temp_contracts_no_renegs	
 	FROM Analytics.dbo.analysis_players_contracts co
@@ -290,8 +291,7 @@ IF OBJECT_ID('tempdb..#temp_games') IS NOT NULL
 		,injury_status_week
 	INTO #temp_games	
 	FROM Analytics.dbo.analysis_players_gameweek_status 	
-	WHERE season >= 2011	
-		AND season_type in ('Reg', 'Post')
+	WHERE season_type in ('Reg', 'Post')
 	ORDER BY nfl_player_id	
 		,nfl_game_week_begin
 		
@@ -318,13 +318,12 @@ IF OBJECT_ID('tempdb..#temp_actives') IS NOT NULL
 		,season
 		
 DROP TABLE #temp_games
-		
+
 		
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 (3)
 
-Join the contracts to the yearly status counts.
 
 We can only trust contract breakdowns after the 08/04/2011 CBA, so only use contracts after that date to get APY. For player seasons before then, use their cap percentage.
 It's not perfect but it's the best approximation we can get (until we get the Pat/Fusee manual breakdowns into the system).  But since the player season data doesn't
@@ -335,7 +334,8 @@ Find out when a player's rookie contract was finished so you can apply that to t
 Manually join in the cap numbers of 5th year options. 
 
 OUTPUT TABLES:
-Analytics.dbo.analysis_players_season_apys
+#temp_players_salary_cap
+#temp_rookie_contract_seasons
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/		
 
@@ -369,20 +369,59 @@ IF OBJECT_ID('tempdb..#temp_rookie_contract_seasons') IS NOT NULL
 	GROUP BY PlayerID
 
 
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(4)
 
 
-	--TRUNCATE TABLE Analytics.dbo.analysis_players_season_apys
-	--INSERT INTO Analytics.dbo.analysis_players_season_apys
+Count up accrued seasons so you know what miminimum salary to apply to each players. If their salary is less than the minimum, set it to the minimum.
+This helps take care of any weird deals.
+
+OUTPUT TABLES:
+#temp_players_season_apys
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/		
+
+-- Check if #temp_accrued_seasons exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_accrued_seasons') IS NOT NULL		
+	DROP TABLE #temp_accrued_seasons
+
+	SELECT nfl_player_id
+		,season
+		,on_53_weeks
+		,SUM(CASE WHEN on_53_weeks >= 6 THEN 1 ELSE 0 END) OVER (PARTITION BY nfl_player_id ORDER BY season) AS accrued_seasons
+	INTO #temp_accrued_seasons
+	FROM #temp_actives ac
+	GROUP BY nfl_player_id
+		,season
+		,on_53_weeks
+
+
+-- Check if #temp_players_season_apys exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_players_season_apys') IS NOT NULL		
+	DROP TABLE #temp_players_season_apys
 
 	SELECT ac.nfl_player_id
+		,ISNULL(aa.accrued_seasons,0) AS accrued_seasons
 		,ac.season
 		,signing_type
+		,signing_date
+		,CASE WHEN ac.season = co.first_contract_year THEN 1 END AS first_season_of_contract
+		,CASE WHEN ac.season = first_contract_year_next - 1 THEN 1 ELSE 0 END AS last_season_of_contract
+		,first_contract_year_next
+		,co.true_average_per_year
 		,CASE WHEN co.nfl_contract_id IS NOT NULL THEN true_apy_percent_of_cap ELSE ca.cap_percentage END AS apy_percent_of_cap
 		,CASE WHEN co.nfl_contract_id IS NULL AND ca.cap_percentage IS NOT NULL THEN 1 ELSE 0 END AS apy_uses_cap
 		,CASE WHEN co.signing_type IN ('Rookie') THEN 1 
 			WHEN co.nfl_contract_id IS NULL AND ca.cap_percentage IS NOT NULL AND ac.season <= rs.last_rookie_deal_season THEN 1
 			ELSE 0
 		END AS rookie_contract
+		,CASE WHEN co.signing_type IN ('Rookie') THEN 1 
+			WHEN co.nfl_contract_id IS NULL AND ca.cap_percentage IS NOT NULL AND ac.season <= rs.last_rookie_deal_season THEN 1
+			WHEN co.first_contract_year - pl.draft_year <= 2 AND CASE WHEN co.nfl_contract_id IS NOT NULL THEN true_apy_percent_of_cap ELSE ca.cap_percentage END <= 0.01 THEN 1
+			ELSE 0
+		END AS signed_in_first_3_seasons
+	INTO #temp_players_season_apys
 	FROM #temp_actives ac
 	LEFT JOIN #temp_contracts co
 		ON ac.nfl_player_id = co.nfl_player_id
@@ -397,19 +436,92 @@ IF OBJECT_ID('tempdb..#temp_rookie_contract_seasons') IS NOT NULL
 		AND ca.cap_order = 1
 	LEFT JOIN #temp_rookie_contract_seasons rs
 		ON ac.nfl_player_id = rs.nfl_player_id
-	WHERE on_53_weeks + pup_weeks + injured_weeks + suspended_weeks > 0
+	LEFT JOIN #temp_accrued_seasons aa
+		ON ac.nfl_player_id = aa.nfl_player_id
+		AND ac.season = aa.season + 1
+	WHERE ac.on_53_weeks + ac.pup_weeks + ac.injured_weeks + ac.suspended_weeks > 0
+		AND ac.season >= 2007
 	ORDER BY player
 		,season
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(5)
+
+
+Update the player season apys table.
+
+In a separate step, add in the apys for deals signed since the last season. You don't have any rows in the "actives" table for these players, that's why it's a 
+separate step.
+
+OUTPUT TABLES:
+Analytics.dbo.analysis_players_season_apys
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+
+	TRUNCATE TABLE Analytics.dbo.analysis_players_season_apys
+	INSERT INTO Analytics.dbo.analysis_players_season_apys
+
+	SELECT nfl_player_id
+		,ap.season
+		,CASE WHEN apy_percent_of_cap < mm.minimum_salary_pct_of_cap THEN mm.minimum_salary_pct_of_cap ELSE apy_percent_of_cap END AS apy_percent_of_cap
+		,apy_uses_cap
+		,rookie_contract
+		,signed_in_first_3_seasons
+		,signing_date
+		,first_season_of_contract
+		,last_season_of_contract
+		--,true_average_per_year
+	FROM #temp_players_season_apys ap
+	LEFT JOIN Analytics.dbo.map_minimum_salaries mm
+		ON ap.season = mm.season
+		AND CASE WHEN ap.accrued_seasons > 10 THEN 10 ELSE ap.accrued_seasons END = mm.accrued_seasons
+
 
 	UPDATE Analytics.dbo.analysis_players_season_apys
 	SET apy_percent_of_cap = 0.13008
 	WHERE nfl_player_id = 32207
 		AND season = 2013
 
-	--UPDATE Analytics.dbo.analysis_players_season_apys
-	--SET apy_percent_of_cap = 0.09946
-	--WHERE nfl_player_id = 37079
-		--AND season = 2018
+	DELETE FROM Analytics.dbo.analysis_players_season_apys
+	WHERE nfl_player_id = 39133
+		AND season = 2014
+		AND signing_date = '11/01/2014'
+
+
+	DECLARE @next_season INT
+	SELECT @next_season = (SELECT MAX(season) FROM Analytics.dbo.map_nfl_league_year_dates WHERE GETDATE() >= league_year_start AND GETDATE() <= regular_season_start)
+
+	--INSERT INTO Analytics.dbo.analysis_players_season_apys
+
+	SELECT nfl_player_id
+		,first_contract_year AS season
+		,true_apy_percent_of_cap AS apy_percent_of_cap
+		,0 AS apy_uses_cap
+		,CASE WHEN co.signing_type IN ('Rookie') THEN 1 ELSE 0 END AS rookie_contract
+		,CASE WHEN co.signing_type IN ('Rookie') THEN 1 
+			WHEN co.first_contract_year - pl.draft_year <= 2 AND true_apy_percent_of_cap <= 0.01 THEN 1
+			ELSE 0
+		END AS signed_in_first_3_seasons
+		,signing_date
+		,CASE WHEN first_contract_year = @next_season THEN 1 ELSE 0 END AS first_season_of_contract
+		,CASE WHEN first_contract_year_next = @next_season THEN 1 ELSE 0 END AS last_season_of_contract
+		--,true_average_per_year
+	FROM #temp_contracts co
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON co.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	LEFT JOIN Analytics.dbo.map_minimum_salaries mm
+		ON co.first_contract_year = mm.season
+		AND CASE WHEN pl.accrued_seasons > 10 THEN 10 ELSE pl.accrued_seasons END = mm.accrued_seasons
+	WHERE first_contract_year = @next_season
+		AND signing_date >= CAST(CONCAT('10/01/',@next_season - 1) AS DATE)
+		AND signing_type <> 'Reserve/Future FA Signing'
+	ORDER BY true_apy_percent_of_cap DESC
+
 
 --update contracts code to take out 5th year option from true apy, cause that is its own thing and its weird to change value once contract changes.
 --look at the cap hits where they are negative pct of cap like Donovan mcnabb
+
