@@ -1,0 +1,415 @@
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+This program is for creating a table with a player true apy value for each season.
+
+	(1)  Get rid of all the "cap deal" renegotations
+	(2)  Find all the seasons a player has some sort of game status in - start in 2011 after the 08/04/2011 CBA
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(1)(a)
+
+Find all the contracts with insurance on them and add that into the contracts table to help find "dummy renegotiations" and "insurance renegotiations.
+	"Dummy" = contract signed that has all the same money as the immediately previous one, just less signing bonus (i.e Mike Pouncey 04/13/2015 and 12/24/2015)
+	"Insurance" = contract signed that has all the same money as the immediately previous one, just less signing bonus and adds insurance.
+
+Also create variables for "in season renegotiation" since renegotiations done in season are assumed to be cap deals.
+
+Also add in "year reduction" and "last year renegotaition" since those are assumed to be real renegotiations.
+
+The reason you can't just have #temp_find_renegotiations be just Renegotiations is because you need the LAGs to include other types of contracts.  Pull out only
+renegotiations later.
+
+OUTPUT TABLES:
+#temp_find_renegotiations
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_insurance_contracts exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_insurance_contracts') IS NOT NULL
+	DROP TABLE #temp_insurance_contracts
+
+	SELECT DISTINCT [ContractID] AS nfl_contract_id
+	INTO #temp_insurance_contracts
+	FROM ClubDB.dbo.SectionYearRep
+	WHERE SectionTitle like '%insur%'
+
+
+-- Check if #temp_find_renegotiations exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_find_renegotiations') IS NOT NULL
+	DROP TABLE #temp_find_renegotiations
+
+	SELECT cr.*
+		,CASE WHEN signing_type = 'Renegotiation' AND cr.signing_date BETWEEN da.regular_season_start AND da.regular_season_end THEN 1 ELSE 0 END AS in_season_renegotiation
+		,CASE WHEN signing_type = 'Renegotiation' AND LAG(last_contract_year) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id ) > last_contract_year THEN 1 ELSE 0 END AS year_reduction
+		,CASE WHEN signing_type = 'Renegotiation' AND first_contract_year = last_contract_year THEN 1 ELSE 0 END AS last_year_renegotiation
+		,CASE WHEN signing_type = 'Renegotiation'
+			AND LAG(total_package_amount) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) - LAG(total_signing_bonus) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) = total_package_amount
+			AND total_signing_bonus = 0
+			AND LAG(first_contract_year) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) =  first_contract_year
+		THEN 1 
+		ELSE 0 
+		END AS dummy_renegotiation
+		,CASE WHEN signing_type = 'Renegotiation'
+			AND LAG(total_package_amount) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) - LAG(total_signing_bonus) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) = total_package_amount
+			AND total_signing_bonus = 0
+			AND LAG(first_contract_year) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, cr.nfl_contract_id) =  first_contract_year
+			AND ic.nfl_contract_id IS NOT NULL
+		THEN 1 
+		ELSE 0 
+		END AS insurance_renegotiation
+	INTO #temp_find_renegotiations
+	FROM Analytics.dbo.analysis_players_contracts cr
+	LEFT JOIN #temp_insurance_contracts ic
+		ON cr.nfl_contract_id = ic.nfl_contract_id
+	INNER JOIN Analytics.dbo.map_nfl_league_year_dates da
+		ON cr.first_contract_year = da.season
+	WHERE cr.signing_date >= '08/04/2011'
+	ORDER BY nfl_player_id
+		,signing_date
+
+DROP TABLE #temp_insurance_contracts
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(1)(b)
+
+Find the renegotiations that are likely raises or pay cuts, not just cap deals.  To do this, create a table with the cap hits the day before and of each Renegotiation
+and compare the change in first and second year cap hit.  If they both go up or both go down, it's likely a real raise or pay cut and not just a "cap deal."
+
+OUTPUT TABLES:
+#temp_raises_pay_cuts
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_day_of_cap_hits exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_day_of_cap_hits') IS NOT NULL
+	DROP TABLE #temp_day_of_cap_hits
+
+	SELECT ca.nfl_player_id
+		,ca.nfl_club_id
+		,co.nfl_contract_id
+		,co.player
+		,signing_date
+		,SUM(CASE WHEN ca.season = co.first_contract_year THEN cap_amount ELSE 0 END) AS first_year_cap_amount
+		,SUM(CASE WHEN ca.season = co.first_contract_year + 1 THEN cap_amount ELSE 0 END) AS second_year_cap_amount
+		,SUM(CASE WHEN ca.season <> co.first_contract_year THEN cap_amount ELSE 0 END) AS remaining_cap_amount
+	INTO #temp_day_of_cap_hits
+	FROM #temp_find_renegotiations co
+	INNER JOIN Analytics.dbo.analysis_players_salary_cap ca
+		ON co.nfl_player_id = ca.nfl_player_id
+		AND ca.season >= co.first_contract_year
+		AND co.nfl_club_id = ca.nfl_club_id
+		AND co.signing_date = ca.from_date
+	WHERE signing_type = 'Renegotiation'
+		AND in_season_renegotiation = 0
+		AND year_reduction = 0
+		AND last_year_renegotiation = 0
+		AND dummy_renegotiation = 0
+	GROUP BY ca.nfl_player_id
+		,ca.nfl_club_id
+		,co.nfl_contract_id
+		,co.player
+		,most_recent_contract
+		,signing_date
+
+
+-- Check if #temp_day_before_cap_hits exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_day_before_cap_hits') IS NOT NULL
+	DROP TABLE #temp_day_before_cap_hits
+
+	SELECT ca.nfl_player_id
+		,ca.nfl_club_id
+		,co.nfl_contract_id
+		,co.player
+		,signing_date
+		,SUM(CASE WHEN ca.season = co.first_contract_year THEN cap_amount ELSE 0 END) AS first_year_cap_amount
+		,SUM(CASE WHEN ca.season = co.first_contract_year + 1 THEN cap_amount ELSE 0 END) AS second_year_cap_amount
+		,SUM(CASE WHEN ca.season <> co.first_contract_year THEN cap_amount ELSE 0 END) AS remaining_cap_amount
+	INTO #temp_day_before_cap_hits
+	FROM #temp_find_renegotiations co
+	INNER JOIN Analytics.dbo.analysis_players_salary_cap ca
+		ON co.nfl_player_id = ca.nfl_player_id
+		AND ca.season >= co.first_contract_year
+		AND co.nfl_club_id = ca.nfl_club_id
+		AND DATEADD(D,-1,co.signing_date) = ca.to_date
+	WHERE signing_type = 'Renegotiation'
+		AND in_season_renegotiation = 0
+		AND year_reduction = 0
+		AND last_year_renegotiation = 0
+		AND dummy_renegotiation = 0
+	GROUP BY ca.nfl_player_id
+		,ca.nfl_club_id
+		,co.nfl_contract_id
+		,co.player
+		,most_recent_contract
+		,signing_date
+
+
+-- Check if #temp_raises_pay_cuts exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_raises_pay_cuts') IS NOT NULL
+	DROP TABLE #temp_raises_pay_cuts
+
+	SELECT do.nfl_player_id
+		,do.nfl_club_id
+		,do.nfl_contract_id
+		,do.player
+		,do.signing_date
+		,CASE WHEN ((do.first_year_cap_amount / NULLIF(be.first_year_cap_amount,0) > 1 AND do.second_year_cap_amount / NULLIF(be.second_year_cap_amount,0) > 1)
+			OR (do.first_year_cap_amount / NULLIF(be.first_year_cap_amount,0) < 1 AND do.second_year_cap_amount / NULLIF(be.second_year_cap_amount,0) < 1))
+			AND ABS(do.first_year_cap_amount - NULLIF(be.first_year_cap_amount,0)) >= 100000
+		THEN 1
+		ELSE 0 
+		END AS likey_raise_or_pay_cut
+		,be.first_year_cap_amount AS first_year_cap_before
+		,do.first_year_cap_amount AS first_year_cap_after
+		,be.second_year_cap_amount AS second_year_cap_amount_before
+		,do.second_year_cap_amount AS second_year_cap_amount_after
+		,be.remaining_cap_amount AS remaining_cap_before
+		,do.remaining_cap_amount AS remaining_cap_after
+	INTO #temp_raises_pay_cuts
+	FROM #temp_day_of_cap_hits do
+	LEFT JOIN #temp_day_before_cap_hits be
+		ON do.nfl_contract_id = be.nfl_contract_id
+
+DROP TABLE #temp_day_of_cap_hits
+DROP TABLE #temp_day_before_cap_hits
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(1)(c)
+
+Create the "cap deals" table.
+
+A renegotiation is probably a cap deal if if is a dummy renegotiation, happens in season, doesn't happen in the last year of the contract, doesn't reduce the years left
+in the contract,  and isn't a likely raise or pay cut.
+
+OUTPUT TABLES:
+#temp_likely_cap_deals
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_likely_cap_deals exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_likely_cap_deals') IS NOT NULL
+	DROP TABLE #temp_likely_cap_deals
+
+	SELECT co.nfl_contract_id
+		,1 AS cap_renegotiation
+	INTO #temp_likely_cap_deals
+	FROM #temp_find_renegotiations co
+	LEFT JOIN #temp_raises_pay_cuts rp
+		ON co.nfl_contract_id = rp.nfl_contract_id
+	WHERE signing_type = 'Renegotiation' 
+		AND (dummy_renegotiation = 1 OR in_season_renegotiation = 1 OR (year_reduction = 0 AND last_year_renegotiation = 0 AND ISNULL(rp.likey_raise_or_pay_cut,0) = 0))
+
+DROP TABLE #temp_find_renegotiations
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(1)(d)
+
+Create a contracts table for getting yearly apy.
+	-Remove likely cap deal renegotiations.
+	-Take the latest contract signed during a season (except for extensions, for those see rule below).
+	-Change the first contract year of extensions signed after Oct 1.  We are counting those as representing the player's value the next season.
+	-Add the first year of the next contract into each contract row, so that you can know when a contract really ends.
+
+
+OUTPUT TABLES:
+#temp_contracts	
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_contracts_no_renegs exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_contracts_no_renegs') IS NOT NULL		
+	DROP TABLE #temp_contracts_no_renegs	
+		
+	SELECT nfl_player_id	
+		,co.nfl_contract_id
+		,player
+		,CASE WHEN signing_type LIKE '%practice%' or signing_type LIKE '%future%' THEN NULL ELSE same_season_contract_count END AS same_season_contract_count
+		,signing_date
+		,signing_date_next_contract
+		,signing_type
+		,true_apy_percent_of_cap
+		,CASE WHEN signing_type IN ('Extension') AND MONTH(signing_date) >= 10 THEN first_contract_year + 1 ELSE first_contract_year END AS first_contract_year
+	INTO #temp_contracts_no_renegs	
+	FROM Analytics.dbo.analysis_players_contracts co
+	LEFT JOIN #temp_likely_cap_deals cd
+		ON co.nfl_contract_id = cd.nfl_contract_id
+	WHERE signing_date >= '08/04/2011'
+		AND ISNULL(cd.cap_renegotiation,0) = 0
+		
+		
+-- Check if #temp_contracts exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_contracts') IS NOT NULL		
+	DROP TABLE #temp_contracts	
+		
+	SELECT *	
+		,LEAD(first_contract_year) OVER (PARTITION BY nfl_player_id ORDER BY signing_date, nfl_contract_id) AS first_contract_year_next
+	INTO #temp_contracts	
+	FROM #temp_contracts_no_renegs co	
+	WHERE same_season_contract_count = (SELECT MAX(same_season_contract_count) FROM #temp_contracts_no_renegs c2 WHERE c2.nfl_player_id = co.nfl_player_id AND c2.first_contract_year = co.first_contract_year)	
+
+DROP TABLE #temp_contracts_no_renegs
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(2)
+
+Count up all the different player statuses by season.
+
+OUTPUT TABLES:
+#temp_actives
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+		
+-- Check if #temp_games exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_games') IS NOT NULL		
+	DROP TABLE #temp_games	
+		
+	SELECT nfl_game_key	
+		,nfl_player_id
+		,club_id
+		,season
+		,season_type
+		,[week]
+		,status_roster_simple
+		,status_game_played
+		,active_game_count
+		,injury_status_week
+	INTO #temp_games	
+	FROM Analytics.dbo.analysis_players_gameweek_status 	
+	WHERE season >= 2011	
+		AND season_type in ('Reg', 'Post')
+	ORDER BY nfl_player_id	
+		,nfl_game_week_begin
+		
+
+-- Check if #temp_actives exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_actives') IS NOT NULL		
+	DROP TABLE #temp_actives
+		
+	SELECT nfl_player_id	
+		,season
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') THEN 1 ELSE 0 END) AS active_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED') THEN 1 ELSE 0 END) AS started_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED','PLAYED','SUBSTITUTE') THEN 1 ELSE 0 END) AS played_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE','INJURED','RESERVE','PRACTICESQUAD','SUSPENDED') THEN 1 ELSE 0 END) AS rostered_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE') THEN 1 ELSE 0 END) AS on_53_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('SUSPENDED') THEN 1 ELSE 0 END) AS suspended_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('PUP') THEN 1 ELSE 0 END) AS pup_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND (status_roster_simple IN ('INJURED') OR (status_roster_simple IN ('INACTIVE') AND injury_status_week IS NOT NULL)) THEN 1 ELSE 0 END) AS injured_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('FREEAGENT') THEN 1 ELSE 0 END) AS free_agent_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('RETIRED') THEN 1 ELSE 0 END) AS retired_weeks
+	INTO #temp_actives	
+	FROM #temp_games
+	GROUP BY nfl_player_id	
+		,season
+		
+DROP TABLE #temp_games
+		
+		
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(3)
+
+Join the contracts to the yearly status counts.
+
+We can only trust contract breakdowns after the 08/04/2011 CBA, so only use contracts after that date to get APY. For player seasons before then, use their cap percentage.
+It's not perfect but it's the best approximation we can get (until we get the Pat/Fusee manual breakdowns into the system).  But since the player season data doesn't
+attach to a team, we need to reduce cap percentage from the cap table down to one row.  Just take the latest one from the season.
+
+Find out when a player's rookie contract was finished so you can apply that to the rows that are getting cap numbers from the cap table instead of the contracts table.
+
+Manually join in the cap numbers of 5th year options. 
+
+OUTPUT TABLES:
+Analytics.dbo.analysis_players_season_apys
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/		
+
+-- Check if #temp_players_salary_cap exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_players_salary_cap') IS NOT NULL		
+	DROP TABLE #temp_players_salary_cap
+			
+	SELECT DISTINCT season
+		,nfl_player_id
+		,cap_percentage
+		,RANK() OVER (PARTITION BY nfl_player_id, season, active_row, dead_money_flag ORDER BY from_date DESC, cap_amount DESC) AS cap_order
+	INTO #temp_players_salary_cap
+	FROM Analytics.dbo.analysis_players_salary_cap
+	WHERE active_row = 1
+		AND dead_money_flag = 0
+		AND cap_percentage > 0
+
+
+-- Check if #temp_rookie_contract_seasons exists, if it does drop it		
+IF OBJECT_ID('tempdb..#temp_rookie_contract_seasons') IS NOT NULL		
+	DROP TABLE #temp_rookie_contract_seasons
+			
+	SELECT PlayerID AS nfl_player_id
+		,MAX(da.season) AS last_rookie_deal_season
+	INTO #temp_rookie_contract_seasons
+	FROM ClubDB.dbo.ContractRep cr
+	INNER JOIN Analytics.dbo.map_nfl_league_year_dates da
+		ON cr.ContractEndDate > da.regular_season_end
+		AND da.season >= 2011
+	WHERE LTRIM(RTRIM(SigningType)) IN ('Selection List Signing','Undrafted Rookie Signing')
+	GROUP BY PlayerID
+
+
+
+
+	--TRUNCATE TABLE Analytics.dbo.analysis_players_season_apys
+	--INSERT INTO Analytics.dbo.analysis_players_season_apys
+
+	SELECT ac.nfl_player_id
+		,ac.season
+		,signing_type
+		,CASE WHEN co.nfl_contract_id IS NOT NULL THEN true_apy_percent_of_cap ELSE ca.cap_percentage END AS apy_percent_of_cap
+		,CASE WHEN co.nfl_contract_id IS NULL AND ca.cap_percentage IS NOT NULL THEN 1 ELSE 0 END AS apy_uses_cap
+		,CASE WHEN co.signing_type IN ('Rookie') THEN 1 
+			WHEN co.nfl_contract_id IS NULL AND ca.cap_percentage IS NOT NULL AND ac.season <= rs.last_rookie_deal_season THEN 1
+			ELSE 0
+		END AS rookie_contract
+	FROM #temp_actives ac
+	LEFT JOIN #temp_contracts co
+		ON ac.nfl_player_id = co.nfl_player_id
+		AND ac.season >= first_contract_year
+		AND ac.season < ISNULL(first_contract_year_next,3099)
+	LEFT JOIN BaneProductionAnalytics.dbo.players pl
+		ON pl.nfl_id = ac.nfl_player_id
+		AND pl.is_deleted = 0
+	LEFT JOIN #temp_players_salary_cap ca
+		ON ac.nfl_player_id = ca.nfl_player_id
+		AND ac.season = ca.season
+		AND ca.cap_order = 1
+	LEFT JOIN #temp_rookie_contract_seasons rs
+		ON ac.nfl_player_id = rs.nfl_player_id
+	WHERE on_53_weeks + pup_weeks + injured_weeks + suspended_weeks > 0
+	ORDER BY player
+		,season
+
+	UPDATE Analytics.dbo.analysis_players_season_apys
+	SET apy_percent_of_cap = 0.13008
+	WHERE nfl_player_id = 32207
+		AND season = 2013
+
+	--UPDATE Analytics.dbo.analysis_players_season_apys
+	--SET apy_percent_of_cap = 0.09946
+	--WHERE nfl_player_id = 37079
+		--AND season = 2018
+
+--update contracts code to take out 5th year option from true apy, cause that is its own thing and its weird to change value once contract changes.
+--look at the cap hits where they are negative pct of cap like Donovan mcnabb
