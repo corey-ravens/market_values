@@ -308,7 +308,7 @@ IF OBJECT_ID('tempdb..#temp_actives') IS NOT NULL
 		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE','INJURED','RESERVE','PRACTICESQUAD','SUSPENDED') THEN 1 ELSE 0 END) AS rostered_weeks
 		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE') THEN 1 ELSE 0 END) AS on_53_weeks
 		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('SUSPENDED') THEN 1 ELSE 0 END) AS suspended_weeks
-		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('PUP') THEN 1 ELSE 0 END) AS pup_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('PUP','NFI') THEN 1 ELSE 0 END) AS pup_weeks
 		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND (status_roster_simple IN ('INJURED') OR (status_roster_simple IN ('INACTIVE') AND injury_status_week IS NOT NULL)) THEN 1 ELSE 0 END) AS injured_weeks
 		,SUM(CASE WHEN status_roster_simple IN ('FREEAGENT') THEN 1 ELSE 0 END) AS free_agent_weeks
 		,SUM(CASE WHEN status_roster_simple IN ('RETIRED') THEN 1 ELSE 0 END) AS retired_weeks
