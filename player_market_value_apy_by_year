@@ -460,7 +460,7 @@ Analytics.dbo.analysis_players_season_apys
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
 
-
+--Analytics.dbo.analysis_players_season_apys_20221209
 	TRUNCATE TABLE Analytics.dbo.analysis_players_season_apys
 	INSERT INTO Analytics.dbo.analysis_players_season_apys
 
@@ -517,7 +517,7 @@ Analytics.dbo.analysis_players_season_apys
 		ON co.first_contract_year = mm.season
 		AND CASE WHEN pl.accrued_seasons > 10 THEN 10 ELSE pl.accrued_seasons END = mm.accrued_seasons
 	WHERE first_contract_year = @next_season
-		AND signing_date >= CAST(CONCAT('10/01/',@next_season - 1) AS DATE)
+		AND signing_date >= CAST(CONCAT('10/01/',ISNULL(@next_season,9999) - 1) AS DATE)
 		AND signing_type <> 'Reserve/Future FA Signing'
 	ORDER BY true_apy_percent_of_cap DESC
 
