@@ -2478,7 +2478,7 @@
 		,CAST(tackle_4_way_sum AS FLOAT) / play_count_sum AS tackles_per_snap
 		,CAST(tackle_runs_sum - tackle_probability_derrick_sum AS FLOAT) / play_count_run_sum AS extra_tackles
 	INTO #temp_tackling_stats
-	FROM  Analytics.dbo.r_input_stats_tackling
+	FROM Analytics.dbo.r_input_stats_tackling
 	WHERE season >= 2007
 		AND rolling_game_stats = 0
 		AND season_type_adjusted = 'REGPOST'
@@ -2489,14 +2489,17 @@
 	IF OBJECT_ID('tempdb..#temp_coverage_stats') IS NOT NULL
 		DROP TABLE #temp_coverage_stats
 
-	SELECT nfl_player_id
-		,season
+	SELECT cs.nfl_player_id
+		,cs.season
 		,CAST(targeted_defender_primary_sum AS FLOAT) / play_count_pass_sum AS targetted_rate
 		,CAST(interception_sum AS FLOAT) / NULLIF(targeted_defender_primary_sum,0) AS interception_rate
 		,ISNULL(CAST(completion_allowed_brv_sum AS FLOAT) / NULLIF(targeted_defender_primary_sum,0),0) AS completion_rate
+		,expected_points_allowed_pff_sum / NULLIF(play_count_pass_sum,0) AS expected_points_allowed
+		,ISNULL(CAST(ISNULL(penalty_defensive_pass_interference_sum,0) + ISNULL(penalty_defensive_holding_sum,0) AS FLOAT) / NULLIF((SELECT SUM(snap_count_defense_no_garbage) FROM AnalyticsDevelopment.dbo.pro_player_season_playtimes pt WHERE cs.nfl_player_id = pt.nfl_player_id AND cs.season = pt.season AND pt.season_type IN ('REG','POST')),0),0) AS dpi_holdings
+		,covered_receiver_grade_sum / NULLIF(covered_receiver_grade_plays,0) AS receiver_grades
 	INTO #temp_coverage_stats
-	FROM Analytics.dbo.r_input_stats_coverage
-	WHERE season >= 2007
+	FROM AnalyticsDevelopment.dbo.pro_player_coverage_stats cs
+	WHERE cs.season >= 2013
 		AND rolling_game_stats = 0
 		AND season_type_adjusted = 'REGPOST'
 		AND play_count_pass_sum > 0
@@ -2517,30 +2520,6 @@
 		AND season_type_adjusted = 'REGPOST'
 		AND play_count_pass_sum > 0
 
-
-	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-	## Get additional CB metrics from Corey's new table.
-
-	TEMP TABLES:
-		#temp_df_cbs
-
-	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
-
-	-- Check if #temp_df_cbs exists, if it does drop it
-	IF OBJECT_ID('tempdb..#temp_df_cbs') IS NOT NULL
-		DROP TABLE #temp_df_cbs
-
-	SELECT nfl_player_id
-		,season
-		,CAST(SUM(expected_points_allowed) AS FLOAT) / NULLIF(SUM(coverage_snaps),0) AS expected_points_allowed
-		,ISNULL(CAST(SUM(dpi_holdings) AS FLOAT) / NULLIF(SUM(snap_count_defense_no_garbage),0),0) AS dpi_holdings
-		,CAST(SUM(covered_receiver_grades) AS FLOAT) / NULLIF(SUM(covered_receiver_plays),0) AS receiver_grades
-	INTO #temp_df_cbs
-	FROM AnalyticsSandbox.dbo.corey_cb_game_grades
-	GROUP BY nfl_player_id
-		,season
-	
 
 	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -2645,9 +2624,6 @@
 	LEFT JOIN #temp_rush_stats rs
 		ON df.nfl_player_id = rs.nfl_player_id
 		AND df.season = rs.season
-	LEFT JOIN #temp_df_cbs cb
-		ON df.nfl_player_id = cb.nfl_player_id
-		AND df.season = cb.season
 	LEFT JOIN #temp_epa_defense ep
 		ON df.nfl_player_id = ep.nfl_player_id
 		AND df.season = ep.season
@@ -2746,9 +2722,6 @@
 	LEFT JOIN #temp_rush_stats rs
 		ON df.nfl_player_id = rs.nfl_player_id
 		AND df.season = rs.season
-	LEFT JOIN #temp_df_cbs cb
-		ON df.nfl_player_id = cb.nfl_player_id
-		AND df.season = cb.season
 	LEFT JOIN #temp_epa_defense ep
 		ON df.nfl_player_id = ep.nfl_player_id
 		AND df.season = ep.season
