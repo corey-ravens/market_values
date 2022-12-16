@@ -1,0 +1,3150 @@
+
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_games
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_games exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_games') IS NOT NULL
+		DROP TABLE #temp_games
+
+	SELECT nfl_game_key
+		,nfl_player_id
+		,club_id AS nfl_club_id
+		,season
+		,season_type
+		,[week]
+		,status_roster_simple
+		,status_game_played
+		,active_game_count
+		,injury_status_week
+	INTO #temp_games
+	FROM Analytics.dbo.analysis_players_gameweek_status
+	WHERE season >= 2004 
+		AND season_type in ('Reg', 'Post')
+	ORDER BY nfl_player_id
+		,nfl_game_week_begin
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_player_max_weeks
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_player_max_weeks exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_player_max_weeks') IS NOT NULL
+		DROP TABLE #temp_player_max_weeks
+
+	SELECT gs.season
+		,gs.nfl_player_id
+		,COUNT(DISTINCT gs.nfl_game_week_begin) AS player_max_weeks
+	INTO #temp_player_max_weeks
+	FROM Analytics.dbo.analysis_players_gameweek_status AS gs
+	WHERE season_type = 'REG'
+	GROUP BY gs.season
+		,gs.nfl_player_id
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_actives
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_actives exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_actives') IS NOT NULL
+		DROP TABLE #temp_actives
+
+	SELECT nfl_player_id
+		,season
+		--,season_type
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') THEN 1 ELSE 0 END) AS active_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED') THEN 1 ELSE 0 END) AS started_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE') AND UPPER(status_game_played) IN ('STARTED','PLAYED','SUBSTITUTE') THEN 1 ELSE 0 END) AS played_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('ACTIVE','INACTIVE','INJURED','RESERVE','PRACTICESQUAD','SUSPENDED','PUP','NFI') THEN 1 ELSE 0 END) AS rostered_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('SUSPENDED') THEN 1 ELSE 0 END) AS suspended_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND status_roster_simple IN ('PUP') THEN 1 ELSE 0 END) AS pup_weeks
+		,SUM(CASE WHEN nfl_game_key IS NOT NULL AND (status_roster_simple IN ('INJURED','PUP') OR (status_roster_simple IN ('INACTIVE') AND injury_status_week IS NOT NULL)) THEN 1 ELSE 0 END) AS injured_weeks
+		--,SUM(CASE WHEN nfl_game_key IS NOT NULL AND (status_roster_simple IN ('INJURED','PUP','NFI') OR (status_roster_simple IN ('INACTIVE') AND injury_status_week IS NOT NULL)) THEN 1 ELSE 0 END) AS injured_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('FREEAGENT') THEN 1 ELSE 0 END) AS free_agent_weeks
+		,SUM(CASE WHEN status_roster_simple IN ('RETIRED') THEN 1 ELSE 0 END) AS retired_weeks
+	INTO #temp_actives
+	FROM #temp_games
+	GROUP BY nfl_player_id
+		,season
+		--,season_type
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_retireds
+		#temp_free_agents
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+			
+	-- Check if #temp_retireds exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_retireds') IS NOT NULL
+		DROP TABLE #temp_retireds
+
+	SELECT nfl_player_id
+		,season
+		--,season_type
+	INTO #temp_retireds
+	FROM #temp_actives
+	WHERE retired_weeks > 0
+		AND rostered_weeks = 0
+	
+
+	-- Check if #temp_free_agents exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_free_agents') IS NOT NULL
+		DROP TABLE #temp_free_agents
+
+	SELECT *
+		--,season_type
+	INTO #temp_free_agents
+	FROM #temp_actives
+	WHERE free_agent_weeks > 0
+		AND rostered_weeks = 0
+
+	
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_active_rates
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/	
+		
+	-- Check if #temp_active_rates exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_active_rates') IS NOT NULL
+		DROP TABLE #temp_active_rates
+
+	SELECT ac.*
+		,active_weeks / NULLIF(rostered_weeks,0) AS active_rate
+		,played_weeks / NULLIF(rostered_weeks,0) AS played_rate
+		,started_weeks / NULLIF(rostered_weeks,0) AS started_rate
+		,(injured_weeks) / NULLIF(rostered_weeks,0) AS injured_rate
+		,suspended_weeks / NULLIF(rostered_weeks,0) AS suspended_rate
+	INTO #temp_active_rates
+	FROM #temp_actives ac
+	WHERE NOT (rostered_weeks = 0 AND (retired_weeks > 0 OR free_agent_weeks > 0))
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_snaps_all
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/	
+
+	-- Check if #temp_snaps_all exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_snaps_all') IS NOT NULL
+		DROP TABLE #temp_snaps_all
+
+	SELECT nfl_player_id
+		,season
+		,season_type
+		,SUM(snap_count_all) AS snap_count_all
+		,SUM(snap_count_od) AS snap_count_od
+		,SUM(snap_count_offense) AS snap_count_offense
+		,SUM(snap_count_defense) AS snap_count_defense
+		,SUM(snap_count_4_phase) AS snap_count_4_phase
+		,SUM(snap_count_offense_team) AS snap_count_offense_team
+		,SUM(snap_count_defense_team) AS snap_count_defense_team
+		,SUM(snap_count_4_phase_team) AS snap_count_4_phase_team
+		,SUM(CASE WHEN snap_count_offense_no_garbage IS NULL OR snap_count_offense_no_garbage = 0 THEN snap_count_offense ELSE snap_count_offense_no_garbage END) AS snap_count_offense_no_garbage
+		,SUM(CASE WHEN snap_count_defense_no_garbage IS NULL OR snap_count_defense_no_garbage = 0 THEN snap_count_defense ELSE snap_count_defense_no_garbage END) AS snap_count_defense_no_garbage
+		,SUM(CASE WHEN snap_count_4_phase_no_garbage IS NULL OR snap_count_4_phase_no_garbage = 0 THEN snap_count_4_phase ELSE snap_count_4_phase_no_garbage END) AS snap_count_4_phase_no_garbage
+		,SUM(CASE WHEN snap_count_offense_no_garbage_team IS NULL OR snap_count_offense_no_garbage_team = 0 THEN snap_count_offense_team ELSE snap_count_offense_no_garbage_team END) AS snap_count_offense_no_garbage_team
+		,SUM(CASE WHEN snap_count_defense_no_garbage_team IS NULL OR snap_count_defense_no_garbage_team = 0 THEN snap_count_defense_team ELSE snap_count_defense_no_garbage_team END) AS snap_count_defense_no_garbage_team
+		,SUM(CASE WHEN snap_count_4_phase_no_garbage_team IS NULL OR snap_count_4_phase_no_garbage_team = 0 THEN snap_count_4_phase_team ELSE snap_count_4_phase_no_garbage_team END) AS snap_count_4_phase_no_garbage_team
+		,SUM(CASE WHEN snap_count_offense_no_garbage_inj_team IS NULL OR snap_count_offense_no_garbage_inj_team = 0 THEN snap_count_offense_team ELSE snap_count_offense_no_garbage_inj_team END) AS snap_count_offense_no_garbage_inj_team
+		,SUM(CASE WHEN snap_count_defense_no_garbage_inj_team IS NULL OR snap_count_defense_no_garbage_inj_team = 0 THEN snap_count_defense_team ELSE snap_count_defense_no_garbage_inj_team END) AS snap_count_defense_no_garbage_inj_team
+		,SUM(CASE WHEN snap_count_4_phase_no_garbage_inj_team IS NULL OR snap_count_4_phase_no_garbage_inj_team = 0 THEN snap_count_4_phase_team ELSE snap_count_4_phase_no_garbage_inj_team END) AS snap_count_4_phase_no_garbage_inj_team
+		,ISNULL(SUM(equivalent_games),0) AS equivalent_games
+		,ISNULL(SUM(equivalent_games_off_def),0) AS equivalent_games_off_def
+		,ISNULL(SUM(equivalent_games),0) - ISNULL(SUM(equivalent_games_off_def),0) AS equivalent_games_st
+		,CASE WHEN SUM(snap_count_offense) > SUM(snap_count_defense) THEN 'off' ELSE 'def' END AS off_def
+	INTO #temp_snaps_all
+	FROM Analytics.dbo.stage_players_season_playtime
+	WHERE season >= 2004
+		AND season_type in ('REG', 'POST')
+	GROUP BY nfl_player_id
+		,season
+		,season_type
+	--HAVING SUM(CASE WHEN season_type IN ('REG') THEN snap_count_all ELSE NULL END) > 0
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_snaps_with_props
+		#temp_snaps
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_snaps_with_props exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_snaps_with_props') IS NOT NULL
+		DROP TABLE #temp_snaps_with_props
+
+	SELECT *
+		,CASE WHEN off_def = 'off' THEN ISNULL(CAST(snap_count_offense_no_garbage + snap_count_defense_no_garbage AS FLOAT) / NULLIF(snap_count_offense_no_garbage_inj_team,0),0)
+			ELSE ISNULL(CAST(snap_count_offense_no_garbage + snap_count_defense_no_garbage AS FLOAT) / NULLIF(snap_count_defense_no_garbage_inj_team,0),0)
+		END AS prop_off_def
+		,CASE WHEN off_def = 'off' THEN ISNULL(CAST(snap_count_offense_no_garbage + snap_count_defense_no_garbage AS FLOAT) / NULLIF(snap_count_offense_no_garbage_team,0),0)
+			ELSE ISNULL(CAST(snap_count_offense_no_garbage + snap_count_defense_no_garbage AS FLOAT) / NULLIF(snap_count_defense_no_garbage_team,0),0)
+		END AS prop_off_def_inj
+		,ISNULL(CAST(snap_count_4_phase_no_garbage AS FLOAT) / NULLIF(snap_count_4_phase_no_garbage_inj_team,0),0) AS prop_st
+		,ISNULL(CAST(snap_count_4_phase_no_garbage AS FLOAT) / NULLIF(snap_count_4_phase_no_garbage_team,0),0) AS prop_st_inj
+	INTO #temp_snaps_with_props
+	FROM #temp_snaps_all
+	
+
+	-- Check if #temp_snaps exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_snaps') IS NOT NULL
+		DROP TABLE #temp_snaps
+
+	SELECT re.*
+		,ISNULL(pt.equivalent_games_off_def,0) AS equivalent_games_off_def_post 
+		,ISNULL(pt.equivalent_games_st,0) AS equivalent_games_st_post
+	INTO #temp_snaps
+	FROM #temp_snaps_with_props re
+	LEFT JOIN #temp_snaps_with_props pt
+		ON re.nfl_player_id = pt.nfl_player_id
+		AND re.season = pt.season
+		AND pt.season_type = 'POST'
+	WHERE re.season_type = 'REG'
+		AND re.snap_count_all > 0
+
+--manually update ragnow 20211020
+	UPDATE #temp_snaps
+	SET prop_off_def = 0.97
+	WHERE nfl_player_id = 46089
+		AND season = 2021
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_actives_with_snaps
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_actives_with_snaps exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_actives_with_snaps') IS NOT NULL
+		DROP TABLE #temp_actives_with_snaps
+
+	SELECT ar.*
+		,snap_count_all
+		,snap_count_od
+		,snap_count_offense
+		,snap_count_defense
+		,snap_count_4_phase
+		,snap_count_offense_team
+		,snap_count_defense_team
+		,snap_count_4_phase_team
+		,snap_count_offense_no_garbage
+		,snap_count_defense_no_garbage
+		,snap_count_4_phase_no_garbage
+		,snap_count_offense_no_garbage_team
+		,snap_count_defense_no_garbage_team
+		,snap_count_4_phase_no_garbage_team
+		,equivalent_games
+		,equivalent_games_off_def
+		,equivalent_games_st
+		,off_def
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,prop_st_inj
+		,equivalent_games_off_def_post 
+		,equivalent_games_st_post
+	INTO #temp_actives_with_snaps
+	FROM #temp_active_rates ar
+	LEFT JOIN #temp_snaps sn
+		ON ar.nfl_player_id = sn.nfl_player_id
+		AND ar.season = sn.season
+		--AND ar.season_type = sn.season_type
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_played
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_played exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_played') IS NOT NULL
+		DROP TABLE #temp_played
+	
+		SELECT ac.*
+		INTO #temp_played
+		FROM #temp_actives_with_snaps ac
+		WHERE snap_count_all >= 100
+			--AND season_type = 'REG'
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_active_little_playing_time
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_active_little_playing_time exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_active_little_playing_time') IS NOT NULL
+		DROP TABLE #temp_active_little_playing_time
+	
+	SELECT ac.*
+	INTO #temp_active_little_playing_time
+	FROM #temp_actives_with_snaps ac
+	WHERE snap_count_all < 100
+		--AND season_type = 'REG'
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_fa_most_recent_seasons
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_fa_most_recent_seasons exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_fa_most_recent_seasons') IS NOT NULL
+		DROP TABLE #temp_fa_most_recent_seasons
+	
+	SELECT ISNULL(fa.nfl_player_id,pl.nfl_player_id) AS nfl_player_id
+		,fa.season AS fa_season
+		,(SELECT MAX(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS last_played_season
+		,fa.season - (SELECT MAX(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS year_diff
+		,(SELECT COUNT(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS prev_seasons
+		,COUNT(pl.nfl_player_id) OVER (PARTITION BY ISNULL(fa.nfl_player_id,pl.nfl_player_id)) AS all_prev_seasons
+		,fa.free_agent_weeks
+		,fa.retired_weeks
+		,fa.active_weeks
+		,fa.injured_weeks
+		,fa.suspended_weeks
+		,fa.started_weeks
+		,fa.played_weeks
+		,fa.rostered_weeks
+		,NULL AS prop_off_def
+		,NULL AS prop_off_def_inj
+		,NULL AS prop_st
+		,NULL AS prop_st_inj
+		,NULL AS snap_count_all
+		,NULL AS equivalent_games_off_def_post
+		,NULL AS equivalent_games_st_post
+	INTO #temp_fa_most_recent_seasons
+	FROM #temp_free_agents fa
+	FULL OUTER JOIN #temp_played pl
+		ON fa.nfl_player_id = pl.nfl_player_id
+		AND fa.season = pl.season
+		--AND fa.season_type = 'REG'
+	ORDER BY ISNULL(fa.nfl_player_id,pl.nfl_player_id)
+		,ISNULL(fa.season,pl.season)
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_active_little_playing_times
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_active_little_playing_times exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_active_little_playing_times') IS NOT NULL
+		DROP TABLE #temp_active_little_playing_times
+	
+	SELECT ISNULL(fa.nfl_player_id,pl.nfl_player_id) AS nfl_player_id
+		,fa.season AS fa_season
+		,(SELECT MAX(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS last_played_season
+		,fa.season - (SELECT MAX(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS year_diff
+		,(SELECT COUNT(season) FROM #temp_played pl2 WHERE fa.nfl_player_id = pl2.nfl_player_id AND pl2.season <= fa.season) AS prev_seasons
+		,COUNT(pl.nfl_player_id) OVER (PARTITION BY ISNULL(fa.nfl_player_id,pl.nfl_player_id)) AS all_prev_seasons
+		,fa.free_agent_weeks
+		,fa.retired_weeks
+		,fa.active_weeks
+		,fa.injured_weeks
+		,fa.suspended_weeks
+		,fa.started_weeks
+		,fa.played_weeks
+		,fa.rostered_weeks
+		,fa.prop_off_def
+		,fa.prop_off_def_inj
+		,fa.prop_st
+		,fa.prop_st_inj
+		,fa.snap_count_all
+		,fa.equivalent_games_off_def_post
+		,fa.equivalent_games_st_post
+	INTO #temp_active_little_playing_times
+	FROM #temp_active_little_playing_time fa
+	FULL OUTER JOIN #temp_played pl
+		ON fa.nfl_player_id = pl.nfl_player_id
+		AND fa.season = pl.season
+		--AND fa.season_type = 'REG'
+	ORDER BY ISNULL(fa.nfl_player_id,pl.nfl_player_id)
+		,ISNULL(fa.season,pl.season)
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_all_player_seasons
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_all_player_seasons exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_all_player_seasons') IS NOT NULL
+		DROP TABLE #temp_all_player_seasons
+	
+	SELECT nfl_player_id
+		,season
+		,free_agent_weeks
+		,retired_weeks
+		,active_weeks
+		,injured_weeks
+		,CASE WHEN injured_weeks >= 4 THEN 1 ELSE 0 END AS injured_weeks_flag
+		,suspended_weeks
+		,started_weeks
+		,played_weeks
+		,rostered_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,prop_st_inj
+		,snap_count_all
+		,equivalent_games_off_def_post
+		,equivalent_games_st_post
+		,NULL AS last_played_season
+		,NULL AS prev_seasons
+		,NULL AS year_diff
+		,'played_high' AS from_table
+	INTO #temp_all_player_seasons
+	FROM #temp_played pl
+
+
+	INSERT INTO #temp_all_player_seasons
+	SELECT fa.nfl_player_id
+		,fa.fa_season AS season
+		,fa.free_agent_weeks
+		,fa.retired_weeks
+		,fa.active_weeks
+		,fa.injured_weeks
+		,CASE WHEN fa.injured_weeks >= 4 THEN 1 ELSE 0 END AS injured_weeks_flag
+		,fa.suspended_weeks
+		,fa.started_weeks
+		,fa.played_weeks
+		,fa.rostered_weeks
+		,fa.prop_off_def
+		,fa.prop_off_def_inj
+		,fa.prop_st
+		,fa.prop_st_inj
+		,fa.snap_count_all
+		,fa.equivalent_games_off_def_post
+		,fa.equivalent_games_st_post
+		,last_played_season
+		,prev_seasons
+		,year_diff
+		,'free_agents' AS from_table
+	FROM #temp_fa_most_recent_seasons fa
+	WHERE fa_season IS NOT NULL
+		AND (year_diff > 0 OR prev_seasons = 0)
+		AND NOT (all_prev_seasons > 0 AND last_played_season IS NULL)
+	ORDER BY nfl_player_id, fa_season
+
+
+	INSERT INTO #temp_all_player_seasons
+	SELECT fa.nfl_player_id
+		,fa.fa_season AS season
+		,fa.free_agent_weeks
+		,fa.retired_weeks
+		,fa.active_weeks
+		,fa.injured_weeks
+		,CASE WHEN fa.injured_weeks >= 4 THEN 1 ELSE 0 END AS injured_weeks_flag
+		,fa.suspended_weeks
+		,fa.started_weeks
+		,fa.played_weeks
+		,fa.rostered_weeks
+		,fa.prop_off_def
+		,fa.prop_off_def_inj
+		,fa.prop_st
+		,fa.prop_st_inj
+		,fa.snap_count_all
+		,fa.equivalent_games_off_def_post
+		,fa.equivalent_games_st_post
+		,last_played_season
+		,prev_seasons
+		,year_diff
+		,'played_low' AS from_table
+	FROM #temp_active_little_playing_times fa
+	WHERE fa_season IS NOT NULL
+		AND (year_diff > 0 OR prev_seasons = 0)
+		AND NOT (all_prev_seasons > 0 AND last_played_season IS NULL)
+	ORDER BY nfl_player_id, fa_season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	Remove extra tables
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	DROP TABLE #temp_games
+	DROP TABLE #temp_actives
+	DROP TABLE #temp_retireds
+	DROP TABLE #temp_free_agents
+	DROP TABLE #temp_active_rates
+	DROP TABLE #temp_snaps_all
+	DROP TABLE #temp_snaps_with_props
+	DROP TABLE #temp_snaps
+	DROP TABLE #temp_actives_with_snaps
+	DROP TABLE #temp_played
+	DROP TABLE #temp_active_little_playing_time
+	DROP TABLE #temp_fa_most_recent_seasons
+	DROP TABLE #temp_active_little_playing_times
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_salaries
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_seasons exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_seasons') IS NOT NULL
+		DROP TABLE #temp_seasons
+
+	DECLARE @RangeStartFrom INT = 2007
+	DECLARE @RangeEndTo INT = (SELECT MAX(last_contract_year) FROM Analytics.dbo.analysis_players_contracts);
+
+	WITH #temp_counter AS (
+		SELECT @RangeStartFrom AS season
+		UNION ALL
+		SELECT season + 1 FROM #temp_counter
+		WHERE season + 1 <= @RangeEndTo
+	)
+
+	SELECT *
+	INTO #temp_seasons
+	FROM #temp_counter
+
+
+	-- Check if #temp_salaries exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_salaries') IS NOT NULL
+		DROP TABLE #temp_salaries
+
+	SELECT pl.id AS bane_player_id
+		,nfl_player_id
+		,nfl_contract_id
+		,previous_nfl_contract_id
+		,player
+		,signing_date
+		,first_contract_year
+		,last_contract_year
+		,total_years
+		,true_years
+		,total_average_per_year
+		,total_package_amount
+		,true_average_per_year
+		,true_apy_percent_of_cap
+		,signing_type
+		,true_extension
+		,fifth_year_option_exercised
+		,is_rookie_contract
+		,is_minimum_salary_benefit_contract
+		,first_new_year
+		,actual_last_contract_year
+		,last_contract_year - first_contract_year + 1 AS salary_length
+		,se.season
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, season, true_average_per_year ORDER BY signing_date DESC) AS player_season_apy_order
+		,CAST(CONCAT('09/18/',season) AS DATE) AS season_start
+		,CASE WHEN CAST(CONCAT('09/18/',season) AS DATE) <= signing_date AND signing_type IN ('Extension','Renegotiation') THEN season + 1 ELSE season END AS season_applies
+	INTO #temp_salaries
+	FROM Analytics.dbo.analysis_players_contracts co
+    LEFT JOIN BaneProductionAnalytics.dbo.players pl
+		ON co.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	INNER JOIN #temp_seasons se
+		ON se.season BETWEEN co.first_contract_year AND co.last_contract_year
+	WHERE se.season >= 2007
+	ORDER BY nfl_player_id
+		,season
+		,signing_date
+
+
+	-- Check if #temp_current_season_contracts exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_current_season_contracts') IS NOT NULL
+		DROP TABLE #temp_current_season_contracts
+
+	SELECT nfl_player_id
+		,nfl_contract_id
+		,signing_date
+		,true_average_per_year
+		,true_apy_percent_of_cap
+		,signing_type
+		,is_minimum_salary_benefit_contract
+		,is_rookie_contract
+		,season
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, season ORDER BY signing_date DESC) AS current_season_contract_order
+	INTO #temp_current_season_contracts
+	FROM #temp_salaries
+	WHERE player_season_apy_order = 1
+		--AND season = season_applies
+	ORDER BY nfl_player_id
+		,season
+		,signing_date
+		
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_salary_caps
+		#temp_league_caps
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_salary_caps exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_salary_caps') IS NOT NULL
+		DROP TABLE #temp_salary_caps
+
+	SELECT sc.nfl_player_id
+		,sc.season
+		,(sc.cap_paragraph_5 + sc.cap_signing_bonus) AS true_average_per_year
+		,CASE WHEN sc.season = 2010 THEN (sc.cap_paragraph_5 + sc.cap_signing_bonus) / 120375000.00 ELSE sc.cap_percentage END AS true_apy_percent_of_cap
+		,ROW_NUMBER() OVER (PARTITION BY sc.nfl_player_id, sc.season ORDER BY ISNULL(to_date,GETDATE()) DESC) AS active_row_order
+	INTO #temp_salary_caps
+	FROM [Analytics].[dbo].[analysis_players_salary_cap] sc
+	WHERE sc.active_row = 1
+		AND sc.dead_money_flag = 0
+
+
+	-- Check if #temp_league_caps exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_league_caps') IS NOT NULL
+		DROP TABLE #temp_league_caps
+
+	SELECT DISTINCT season
+		,league_salary_cap
+	INTO #temp_league_caps
+	FROM BaneProductionAnalytics.dbo.league_salary_cap_summaries
+	WHERE season >= 2007
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_transaction_clubs
+		#temp_transactions
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+/*
+
+--This is a way to find unique clubs in EITHER start or result club column, but really if you only use resultclub that gets you how many different teams he ended up on so its a better way to do it.
+
+	-- Check if #temp_transaction_clubs exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_transaction_clubs') IS NOT NULL
+		DROP TABLE #temp_transaction_clubs
+
+	SELECT PlayerID AS nfl_player_id
+		,Season
+		,COUNT(DISTINCT club) AS transaction_clubs
+	INTO #temp_transaction_clubs
+	FROM (
+		SELECT PlayerID, Season, StartClubAbbr AS club FROM ProDB.dbo.TransactionTable WHERE LeagueType = 'NFL' AND TransactionDescAbbr NOT IN ('MO01', 'SS01', 'RE08', 'FA08', 'RE49', 'PS09', 'EX14') AND Season >= 2007
+		UNION
+		SELECT PlayerID, Season, ResultClubAbbr AS club FROM ProDB.dbo.TransactionTable WHERE LeagueType = 'NFL' AND TransactionDescAbbr NOT IN ('MO01', 'SS01', 'RE08', 'FA08', 'RE49', 'PS09', 'EX14') AND Season >= 2007
+	) AS DistinctClubs (PlayerID, Season, club)
+	GROUP BY PlayerID
+		,Season
+
+
+*/
+
+
+	-- Check if #temp_transactions exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_transactions') IS NOT NULL
+		DROP TABLE #temp_transactions
+
+	SELECT PlayerID AS nfl_player_id
+		,Season
+		,COUNT(*) AS transactions
+		,COUNT(DISTINCT ISNULL(ResultClubAbbr,StartClubAbbr)) AS transaction_clubs
+	INTO #temp_transactions
+	FROM ProDB.dbo.TransactionTable tt
+	WHERE LeagueType = 'NFL'
+		AND TransactionDescAbbr not in ('MO01', 'SS01', 'RE08', 'FA08', 'RE49', 'PS09', 'EX14')
+		AND Season >= 2007
+	GROUP BY PlayerID
+		,Season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	TEMP TABLES:
+		#temp_format_salary_per_year
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_format_salary_per_year exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_format_salary_per_year') IS NOT NULL
+		DROP TABLE #temp_format_salary_per_year
+
+	SELECT ap.*
+		--,COALESCE(co.nfl_contract_id,LAG(co.nfl_contract_id,1) OVER (PARTITION BY co.nfl_player_id ORDER BY co.season),LAG(co.nfl_contract_id,2) OVER (PARTITION BY co.nfl_player_id ORDER BY co.season),ROW_NUMBER() OVER (PARTITION BY ap.nfl_player_id ORDER BY ap.season) * 1000000 + ap.nfl_player_id) AS nfl_contract_id
+		,co.nfl_contract_id
+		,ROW_NUMBER() OVER (PARTITION BY ap.nfl_player_id ORDER BY ap.season) * 1000000 + ap.nfl_player_id AS alternate_contract_id
+		,co.signing_date
+		,COALESCE(co.true_average_per_year,sc.true_average_per_year) AS true_average_per_year
+		,COALESCE(py.apy_percent_of_cap,co.true_apy_percent_of_cap,sc.true_apy_percent_of_cap,COALESCE(co.true_average_per_year,sc.true_average_per_year) / NULLIF(league_salary_cap,0)) AS true_apy_percent_of_cap
+		,league_salary_cap AS salary_cap
+		,co.signing_type
+		,co.is_minimum_salary_benefit_contract
+		,co.is_rookie_contract
+		,py.signed_in_first_3_seasons
+		,CASE WHEN tt.transactions IS NULL AND snap_count_all > 0 THEN 0 ELSE tt.transactions END AS transactions
+		,CASE WHEN tt.transaction_clubs IS NULL AND snap_count_all > 0 THEN 1 ELSE tt.transaction_clubs END AS transaction_clubs
+		,mx.player_max_weeks
+		,CASE WHEN snap_count_all IS NULL OR snap_count_all < 100 THEN ap.season - last_played_season ELSE 0 END AS years_since_last_played
+		,CASE WHEN (snap_count_all IS NULL OR snap_count_all < 100) AND rostered_weeks = 0 AND free_agent_weeks > 0 THEN 1 ELSE 0 END AS free_agent_season
+	INTO #temp_format_salary_per_year
+	FROM #temp_all_player_seasons ap
+	LEFT JOIN #temp_current_season_contracts co
+		ON ap.nfl_player_id = co.nfl_player_id
+		AND ap.season = co.season
+		AND co.current_season_contract_order = 1
+	LEFT JOIN #temp_salary_caps sc
+		ON ap.nfl_player_id = sc.nfl_player_id
+		AND ap.season = sc.season
+		AND sc.active_row_order = 1
+	LEFT JOIN Analytics.dbo.analysis_players_season_apys py
+		ON ap.nfl_player_id = py.nfl_player_id
+		AND ap.season = py.season
+	LEFT JOIN #temp_league_caps lc
+		ON ap.season = lc.season
+	LEFT JOIN #temp_transactions tt
+		ON ap.nfl_player_id = tt.nfl_player_id
+		AND ap.season = tt.Season
+	LEFT JOIN #temp_player_max_weeks mx
+		ON ap.nfl_player_id = mx.nfl_player_id
+		AND ap.season = mx.season
+	WHERE ap.season >= 2007
+		AND ap.season <> 2010
+	ORDER BY ap.nfl_player_id, ap.season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Add explanatory Data Player information
+
+	TEMP TABLES:
+		#temp_df_clean
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_clean exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean') IS NOT NULL
+		DROP TABLE #temp_df_clean
+		
+	SELECT sy.nfl_player_id
+		,pl.id AS bane_player_id
+		,CONCAT(pl.nfl_id,'-',sy.season) AS unique_id
+		,CONCAT(pl.last_name,', ',pl.goes_by) AS player
+		,po.translation AS position
+		,pg.abbreviation AS position_group
+		,FLOOR(DATEDIFF(DD,(birth_date),CONCAT('09/01/',sy.season)) / 365.2425) AS age
+		,pl.draft_number
+		,pl.draft_year
+		,ms.height
+		,CAST(SUBSTRING(CAST(ms.height AS NVARCHAR(4)),1,1) AS FLOAT) * 12 + CAST(SUBSTRING(CAST(ms.height AS NVARCHAR(4)),2,2) AS FLOAT) + CAST(SUBSTRING(CAST(ms.height AS NVARCHAR(4)),4,1) AS FLOAT) * 1/8 AS height_continuous
+		,ms.[weight]
+		,ms.ten_yard_dash
+		,ms.arm_length
+		,ms.hand_span
+		,season
+		,CASE WHEN rostered_weeks = 0 AND free_agent_weeks > 0 THEN 1
+			WHEN snap_count_all >= 100 AND years_since_last_played = 0 THEN 0
+			ELSE NULL
+		END AS is_free_agent
+		,last_played_season
+		,COALESCE(nfl_contract_id,LAG(nfl_contract_id,1) OVER (PARTITION BY sy.nfl_player_id ORDER BY sy.season),alternate_contract_id) AS nfl_contract_id
+		,signing_date
+		,true_average_per_year AS true_apy
+		,true_apy_percent_of_cap AS true_apy_percent
+		,signing_type
+		,is_rookie_contract AS rookie_contract
+		,is_minimum_salary_benefit_contract AS minimum_salary
+		,sy.signed_in_first_3_seasons
+		,salary_cap
+		,years_since_last_played
+		,CASE WHEN CAST(free_agent_weeks AS FLOAT) / NULLIF(player_max_weeks,0) > 1 THEN 1 ELSE CAST(free_agent_weeks AS FLOAT) / NULLIF(player_max_weeks,0) END AS free_agent_weeks
+		--,free_agent_weeks
+		,CASE WHEN CAST(injured_weeks AS FLOAT) / NULLIF(player_max_weeks,0) > 1 THEN 1 ELSE CAST(injured_weeks AS FLOAT) / NULLIF(player_max_weeks,0) END AS injured_weeks
+		--,injured_weeks_flag
+		,CASE WHEN CAST(suspended_weeks AS FLOAT) / NULLIF(player_max_weeks,0) > 1 THEN 1 ELSE CAST(suspended_weeks AS FLOAT) / NULLIF(player_max_weeks,0) END AS suspended_weeks
+		--,suspended_weeks
+		,player_max_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,snap_count_all
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,CASE WHEN CAST(transactions AS FLOAT) / NULLIF(player_max_weeks,0) > 1 THEN 1 ELSE CAST(transactions AS FLOAT) / NULLIF(player_max_weeks,0) END AS transactions
+		--,transactions
+		,CAST(transaction_clubs AS FLOAT) / NULLIF(player_max_weeks,0) AS transaction_clubs
+		--,transaction_clubs
+		,gr.grade_bucket AS grade_value
+		,gr.grade_value AS grade_bucket
+		,gr2.grade_bucket AS last_grade_value
+		,gr2.grade_value AS last_grade_bucket
+	INTO #temp_df_clean
+	FROM #temp_format_salary_per_year sy
+	LEFT JOIN BaneProductionAnalytics.dbo.players pl
+		ON sy.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	LEFT JOIN BaneProductionAnalytics.dbo.positions po
+		ON po.id = pl.position_id
+	LEFT JOIN BaneProductionAnalytics.dbo.position_groups pg
+		ON pg.id = po.position_group_id
+	LEFT JOIN BaneProductionAnalytics.dbo.measurable_summaries ms
+		ON ms.player_id = pl.id
+	LEFT JOIN [Analytics].[dbo].[analysis_players_pro_grades] gr
+		ON pl.id = gr.bane_player_id
+		AND sy.season = gr.report_season
+		AND gr.created_date = (SELECT MAX(created_date) FROM [Analytics].[dbo].[analysis_players_pro_grades])
+	LEFT JOIN [Analytics].[dbo].[analysis_players_pro_grades] gr2
+		ON pl.id = gr2.bane_player_id
+		AND sy.last_played_season = gr2.report_season
+		AND gr2.created_date = (SELECT MAX(created_date) FROM [Analytics].[dbo].[analysis_players_pro_grades])
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	##PFF Grades
+
+	TEMP TABLES:
+		#temp_pff_grades
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_pff_players exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_pff_players') IS NOT NULL
+		DROP TABLE #temp_pff_players
+
+	SELECT DISTINCT gsis_player_id AS nfl_player_id
+		,player_id AS pff_player_id
+	INTO #temp_pff_players
+	FROM PFFUltimate.dbo.offense oo
+	INNER JOIN PFFUltimate.dbo.games gg
+		ON oo.game_id = gg.id
+	WHERE season >= 2020
+
+
+	INSERT INTO #temp_pff_players
+	SELECT DISTINCT gsis_player_id AS nfl_player_id
+		,player_id AS pff_player_id
+	FROM PFFUltimate.dbo.defense oo
+	INNER JOIN PFFUltimate.dbo.games gg
+		ON oo.game_id = gg.id
+	WHERE season >= 2020
+		AND gsis_player_id NOT IN (SELECT DISTINCT nfl_player_id FROM #temp_pff_players)
+
+
+	INSERT INTO #temp_pff_players
+	SELECT DISTINCT gsis_player_id AS nfl_player_id
+		,player_id AS pff_player_id
+	FROM PFFUltimate.dbo.special oo
+	INNER JOIN PFFUltimate.dbo.games gg
+		ON oo.game_id = gg.id
+	WHERE season >= 2020
+		AND gsis_player_id NOT IN (SELECT DISTINCT nfl_player_id FROM #temp_pff_players)
+
+
+	-- Check if #temp_pff_grades exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_pff_grades') IS NOT NULL
+		DROP TABLE #temp_pff_grades
+  
+	SELECT nfl_player_id
+		,season
+		,CASE WHEN ISNULL(offense,-999) > ISNULL(defense,-999) THEN offense ELSE defense END AS pff_grade
+		,ROW_NUMBER() OVER (PARTITION BY player_id, season ORDER BY [week] DESC) AS week_order
+	INTO #temp_pff_grades
+	FROM PFFUltimate.dbo.season_grade sg
+	INNER JOIN #temp_pff_players pl
+		ON sg.player_id = pl.pff_player_id
+	WHERE season >= 2020
+	
+	DELETE FROM #temp_pff_grades
+	WHERE week_order > 1
+
+
+	INSERT INTO #temp_pff_grades
+	SELECT pff_GSISPLAYERID AS nfl_player_id
+		,season
+		,CASE WHEN ISNULL(offense,-999) > ISNULL(defense,-999) THEN offense ELSE defense END AS pff_grade
+		,1 AS week_order
+	FROM Analytics.dbo.pff_season_grades
+	WHERE offense IS NOT NULL
+		OR defense IS NOT NULL
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join in pff
+
+	TEMP TABLES:
+		#temp_df_clean_with_pff
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_clean_with_pff exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_with_pff') IS NOT NULL
+		DROP TABLE #temp_df_clean_with_pff
+		
+	SELECT df.*
+		,pf.pff_grade
+		,pf2.pff_grade AS last_pff_grade
+	INTO #temp_df_clean_with_pff
+	FROM #temp_df_clean df
+	LEFT JOIN #temp_pff_grades pf
+		ON df.nfl_player_id = pf.nfl_player_id
+		AND df.season = pf.season
+	LEFT JOIN #temp_pff_grades pf2
+		ON df.nfl_player_id = pf2.nfl_player_id
+		AND df.last_played_season = pf2.season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join in awards
+
+	TEMP TABLES:
+		#temp_df_clean_with_awards
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_pro_awards exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_pro_awards') IS NOT NULL
+		DROP TABLE #temp_pro_awards
+
+	SELECT playerid AS nfl_player_id
+		,season
+		,SUM(CASE WHEN [Description] IN ('AP - All Pro 1st Team') THEN 1 ELSE 0 END) AS all_pro_awards
+		,SUM(CASE WHEN [Description] IN ('AP - All Pro 2nd Team') THEN 1 ELSE 0 END) AS all_pro_2_awards
+		,SUM(CASE WHEN [Description] IN ('Pro Bowl - Original Ballot') THEN 1 ELSE 0 END) AS pro_bowl_awards
+		,SUM(CASE WHEN [Description] IN ('NFL Player of the Week') THEN 1 ELSE 0 END) AS player_of_the_week_awards
+	INTO #temp_pro_awards
+	FROM [ClubDB].[dbo].[PlayerHonors]
+	WHERE season > 2007
+		AND [Description] IN ('NFL Player of the Week','Pro Bowl - Original Ballot','AP - All Pro 2nd Team','AP - All Pro 1st Team')
+	GROUP BY playerid
+		,season
+
+
+	-- Check if #temp_df_clean_with_awards exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_with_awards') IS NOT NULL
+		DROP TABLE #temp_df_clean_with_awards
+
+	SELECT df.*
+		,ISNULL(all_pro_awards,0) AS all_pro_awards
+		,ISNULL(all_pro_2_awards,0) AS all_pro_2_awards
+		,ISNULL(pro_bowl_awards,0) AS pro_bowl_awards
+		,ISNULL(player_of_the_week_awards,0) AS player_of_the_week_awards
+	INTO #temp_df_clean_with_awards
+	FROM #temp_df_clean_with_pff df
+	LEFT JOIN #temp_pro_awards aw
+		ON df.nfl_player_id = aw.nfl_player_id
+		AND df.season = aw.season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join in Madden
+
+	TEMP TABLES:
+		#temp_df_clean_with_madden
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_madden_grades_all exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_madden_grades_all') IS NOT NULL
+		DROP TABLE #temp_madden_grades_all
+
+	SELECT nfl_player_id
+		,[year] - 2 AS season
+		,[week]
+		,overall_rating AS madden_rating
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, [year] - 2 ORDER BY [week], overall_rating DESC, club) AS madden_order
+	INTO #temp_madden_grades_all
+	FROM AnalyticsWork.dbo.madden_overall_ratings_by_week 
+	WHERE club NOT IN ('Free Agents','AFC','NFC','FA')
+		AND [week] <= 1
+
+	DELETE FROM #temp_madden_grades_all
+	WHERE madden_order > 1
+
+	INSERT INTO #temp_madden_grades_all
+	SELECT nfl_player_id
+		,[year] - 1 AS season
+		,[week]
+		,overall_rating AS madden_rating
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, [year] - 1 ORDER BY [week] DESC, overall_rating DESC, club) AS madden_order
+	FROM AnalyticsWork.dbo.madden_overall_ratings_by_week 
+	WHERE club NOT IN ('Free Agents','AFC','NFC','FA')
+		AND [week] > 1
+
+	DELETE FROM #temp_madden_grades_all
+	WHERE madden_order > 1
+
+	-- Check if #temp_madden_grades exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_madden_grades') IS NOT NULL
+		DROP TABLE #temp_madden_grades
+
+	SELECT nfl_player_id
+		,season
+		,madden_rating
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, season ORDER BY [week] DESC) AS madden_order
+	INTO #temp_madden_grades
+	FROM #temp_madden_grades_all
+
+	DELETE FROM #temp_madden_grades
+	WHERE madden_order > 1
+
+
+	-- Check if #temp_df_clean_with_madden exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_with_madden') IS NOT NULL
+		DROP TABLE #temp_df_clean_with_madden
+
+	SELECT df.*
+		,ma.madden_rating
+		,ma2.madden_rating AS last_madden_rating
+	INTO #temp_df_clean_with_madden
+	FROM #temp_df_clean_with_awards df
+	LEFT JOIN #temp_madden_grades ma
+		ON df.nfl_player_id = ma.nfl_player_id
+		AND df.season = ma.season
+	LEFT JOIN #temp_madden_grades ma2
+		ON df.nfl_player_id = ma2.nfl_player_id
+		AND df.last_played_season = ma2.season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join in season positions
+
+	TEMP TABLES:
+		#temp_df_clean_with_positions
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_season_positions exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_season_positions') IS NOT NULL
+		DROP TABLE #temp_season_positions
+
+	SELECT CAST(nfl_player_id AS INT) AS nfl_player_id
+		,season
+		,season_type_adjusted
+		,position_blt
+		,snap_count_all
+		,role_pff
+	INTO #temp_season_positions
+	FROM Analytics.dbo.analysis_players_season_position_defense
+	WHERE season >= 2007
+		AND defense_type = 'ALL'
+		
+
+	INSERT INTO #temp_season_positions
+	SELECT CAST(nfl_player_id AS INT) AS nfl_player_id
+		,season
+		,season_type_adjusted
+		,position_blt
+		,snap_count_all
+		,NULL AS role_pff
+	FROM Analytics.dbo.analysis_players_season_position_offense
+	WHERE season >= 2007
+
+
+	-- Check if #temp_season_positions_order exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_season_positions_order') IS NOT NULL
+		DROP TABLE #temp_season_positions_order
+
+	SELECT nfl_player_id
+		,season
+		,season_type_adjusted
+		,snap_count_all
+		,CASE WHEN position_blt IN ('LOG','ROG') THEN 'OG'
+			WHEN position_blt IN ('LOT','ROT') THEN 'OT'
+			WHEN position_blt IN ('OC') THEN 'OC'
+			WHEN position_blt IN ('FS','SS') THEN 'DS'
+			WHEN position_blt IN ('CB','NB') THEN 'DC'
+			WHEN position_blt IN ('MIKE','WILL','SAM','RUSH','DE43') AND role_pff IN ('RUSH') THEN 'OB'
+			WHEN position_blt IN ('MIKE','WILL','SAM','RUSH','DE43') THEN 'IB'
+			WHEN position_blt IN ('NT','DT3T','DE5T') THEN 'DL'
+			ELSE position_blt
+		END AS position_blt
+		,role_pff
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, season ORDER BY season_type_adjusted DESC, snap_count_all DESC) AS position_order
+	INTO #temp_season_positions_order
+	FROM #temp_season_positions
+
+	DELETE FROM #temp_season_positions_order
+	WHERE position_order > 1
+
+
+	-- Check if #temp_df_clean_with_positions exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_with_positions') IS NOT NULL
+		DROP TABLE #temp_df_clean_with_positions
+
+	SELECT df.*
+		,position_blt
+		,role_pff
+	INTO #temp_df_clean_with_positions
+	FROM #temp_df_clean_with_madden df
+	LEFT JOIN #temp_season_positions_order ma
+		ON df.nfl_player_id = ma.nfl_player_id
+		AND df.season = ma.season
+
+
+	-- Check if #temp_fills exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_fills') IS NOT NULL
+		DROP TABLE #temp_fills;
+
+	WITH grouped_table as (
+	SELECT nfl_player_id
+		,season
+		,position_blt
+		,COUNT(position_blt) OVER (PARTITION BY nfl_player_id ORDER BY season) AS position_fill_forward_group
+		,COUNT(position_blt) OVER (PARTITION BY nfl_player_id ORDER BY season DESC) AS position_fill_backward_group
+		,pff_grade
+		,COUNT(pff_grade) OVER (PARTITION BY nfl_player_id ORDER BY season) AS pff_grade_fill_forward_group
+		,COUNT(pff_grade) OVER (PARTITION BY nfl_player_id ORDER BY season DESC) AS pff_grade_fill_backward_group
+		,grade_value
+		,COUNT(grade_value) OVER (PARTITION BY nfl_player_id ORDER BY season) AS grade_value_fill_forward_group
+		,COUNT(grade_value) OVER (PARTITION BY nfl_player_id ORDER BY season DESC) AS grade_value_fill_backward_group
+		,madden_rating
+		,COUNT(madden_rating) OVER (PARTITION BY nfl_player_id ORDER BY season) AS madden_rating_fill_forward_group
+		,COUNT(madden_rating) OVER (PARTITION BY nfl_player_id ORDER BY season DESC) AS madden_rating_fill_backward_group
+	FROM #temp_df_clean_with_positions
+	)
+	,final_table AS(
+	SELECT nfl_player_id
+		,season
+		,position_blt
+		,position_fill_forward_group
+		,position_fill_backward_group
+		,first_value(position_blt) OVER (PARTITION BY nfl_player_id, position_fill_forward_group ORDER BY season) AS position_blt_fill_forward
+		,first_value(position_blt) OVER (PARTITION BY nfl_player_id, position_fill_backward_group ORDER BY season DESC) AS position_blt_fill_backward
+		,pff_grade_fill_forward_group
+		,pff_grade_fill_backward_group
+		,first_value(pff_grade) OVER (PARTITION BY nfl_player_id, pff_grade_fill_forward_group ORDER BY season) AS pff_grade_fill_forward
+		,first_value(pff_grade) OVER (PARTITION BY nfl_player_id, pff_grade_fill_backward_group ORDER BY season DESC) AS pff_grade_fill_backward
+		,grade_value_fill_forward_group
+		,grade_value_fill_backward_group
+		,first_value(grade_value) OVER (PARTITION BY nfl_player_id, grade_value_fill_forward_group ORDER BY season) AS grade_value_fill_forward
+		,first_value(grade_value) OVER (PARTITION BY nfl_player_id, grade_value_fill_backward_group ORDER BY season DESC) AS grade_value_fill_backward
+		,madden_rating_fill_forward_group
+		,madden_rating_fill_backward_group
+		,first_value(madden_rating) OVER (PARTITION BY nfl_player_id, madden_rating_fill_forward_group ORDER BY season) AS madden_rating_fill_forward
+		,first_value(madden_rating) OVER (PARTITION BY nfl_player_id, madden_rating_fill_backward_group ORDER BY season DESC) AS madden_rating_fill_backward
+	FROM grouped_table
+	)
+	SELECT nfl_player_id
+		,season
+		,position_blt_fill_forward
+		,position_blt_fill_backward
+		,pff_grade_fill_forward
+		,pff_grade_fill_backward
+		,grade_value_fill_forward
+		,grade_value_fill_backward
+		,madden_rating_fill_forward
+		,madden_rating_fill_backward
+	INTO #temp_fills
+	FROM final_table
+
+
+	-- Update the college_play_passing_facts table with catch probability
+	UPDATE #temp_df_clean_with_positions
+		SET position_blt  = COALESCE(position_blt,r.position_blt_fill_forward,r.position_blt_fill_backward,CASE WHEN position_group IN ('OL','RB','LB','DB') THEN position ELSE position_group END)
+			,pff_grade = COALESCE(pff_grade,pff_grade_fill_forward,pff_grade_fill_backward)
+			,grade_value = COALESCE(grade_value,grade_value_fill_forward,grade_value_fill_backward)
+			,madden_rating = COALESCE(madden_rating,madden_rating_fill_forward,madden_rating_fill_backward)
+	FROM #temp_fills r
+	WHERE #temp_df_clean_with_positions.nfl_player_id = r.nfl_player_id
+		AND #temp_df_clean_with_positions.season = r.season
+
+
+	DROP TABLE #temp_df_clean
+	SELECT *
+	INTO #temp_df_clean
+	FROM #temp_df_clean_with_positions
+	DROP TABLE #temp_df_clean_with_positions
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Add explanatory Data Player information
+
+	TEMP TABLES:
+		#temp_df_train
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_train exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train') IS NOT NULL
+		DROP TABLE #temp_df_train
+
+	SELECT unique_id
+		,nfl_player_id
+		,bane_player_id
+		,nfl_contract_id
+		,rookie_contract
+		,signed_in_first_3_seasons
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,is_free_agent
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,CASE WHEN is_free_agent = 1 THEN NULL ELSE free_agent_weeks END AS free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,player_max_weeks
+	INTO #temp_df_train
+	FROM #temp_df_clean
+
+		
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Add explanatory Data Player information
+
+	TEMP TABLES:
+		#temp_season_max
+	
+	UPDATE:
+		#temp_df_train
+		#temp_df_clean
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_season_pos_max exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_season_pos_max') IS NOT NULL
+		DROP TABLE #temp_season_pos_max
+		
+	SELECT season
+		,position_blt
+		,MAX(true_apy_percent) AS season_max_salary
+		,MIN(true_apy_percent) AS season_min_salary
+	INTO #temp_season_pos_max
+	FROM #temp_df_train
+	WHERE is_free_agent = 0
+		AND rookie_contract = 0
+		AND signed_in_first_3_seasons = 0
+	GROUP BY position_blt
+		,season
+
+
+	-- Check if #temp_season_max exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_season_max') IS NOT NULL
+		DROP TABLE #temp_season_max
+		
+	SELECT ISNULL(LEAD(season,1) OVER (PARTITION BY position_blt ORDER BY season),(SELECT MAX(season) + 1 FROM #temp_season_pos_max)) AS season
+		,position_blt
+		,season_max_salary
+		,season_min_salary
+		,MAX(season_max_salary) OVER (PARTITION BY position_blt ORDER BY season) AS season_cummax
+		,MIN(season_max_salary) OVER (PARTITION BY position_blt ORDER BY season) AS season_cummin
+	INTO #temp_season_max
+	FROM #temp_season_pos_max
+
+
+	ALTER TABLE #temp_df_train ADD position_salary_cummax FLOAT
+	ALTER TABLE #temp_df_clean ADD position_salary_cummax FLOAT
+
+
+	UPDATE #temp_df_train
+	SET position_salary_cummax = sm.season_cummax
+	FROM #temp_season_max sm
+		WHERE #temp_df_train.season = sm.season
+		AND #temp_df_train.position_blt = sm.position_blt
+
+	
+	UPDATE #temp_df_clean
+	SET position_salary_cummax = sm.season_cummax
+	FROM #temp_season_max sm
+		WHERE #temp_df_clean.season = sm.season
+		AND #temp_df_clean.position_blt = sm.position_blt
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## One hot encode position_blt
+
+	TEMP TABLES:
+		#temp_df_train_one_hot_pos
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_train_one_hot_pos exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_one_hot_pos') IS NOT NULL
+		DROP TABLE #temp_df_train_one_hot_pos
+
+	SELECT *
+		,CASE WHEN position_blt = 'QB' THEN 1 ELSE 0 END AS position_blt_QB
+		,CASE WHEN position_blt = 'RB' THEN 1 ELSE 0 END AS position_blt_RB
+		,CASE WHEN position_blt = 'FB' THEN 1 ELSE 0 END AS position_blt_FB
+		,CASE WHEN position_blt = 'WR' THEN 1 ELSE 0 END AS position_blt_WR
+		,CASE WHEN position_blt = 'TE' THEN 1 ELSE 0 END AS position_blt_TE
+		,CASE WHEN position_blt = 'OT' THEN 1 ELSE 0 END AS position_blt_OT
+		,CASE WHEN position_blt = 'OG' THEN 1 ELSE 0 END AS position_blt_OG
+		,CASE WHEN position_blt = 'OC' THEN 1 ELSE 0 END AS position_blt_OC
+		,CASE WHEN position_blt = 'DL' THEN 1 ELSE 0 END AS position_blt_DL
+		,CASE WHEN position_blt = 'OB' THEN 1 ELSE 0 END AS position_blt_OB
+		,CASE WHEN position_blt = 'IB' THEN 1 ELSE 0 END AS position_blt_IB
+		,CASE WHEN position_blt = 'DC' THEN 1 ELSE 0 END AS position_blt_DC
+		,CASE WHEN position_blt = 'DS' THEN 1 ELSE 0 END AS position_blt_DS
+	INTO #temp_df_train_one_hot_pos
+	FROM #temp_df_train
+	WHERE position_blt <>  'ST'
+
+
+	--ALTER TABLE #temp_df_train_one_hot_pos
+	--DROP COLUMN --position_group --,position_blt
+
+
+	DROP TABLE #temp_df_train
+	SELECT *
+	INTO #temp_df_train
+	FROM #temp_df_train_one_hot_pos
+	DROP TABLE #temp_df_train_one_hot_pos
+
+
+	ALTER TABLE #temp_df_train
+	DROP COLUMN nfl_contract_id--,nfl_player_id, bane_player_id
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## separate out free agents, rookie contracts, and first three season contract into their own table
+
+	TEMP TABLES:
+		#temp_df_fa
+		#temp_df_train
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_fa exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_fa') IS NOT NULL
+		DROP TABLE #temp_df_fa
+
+	SELECT *
+	INTO #temp_df_fa
+	FROM #temp_df_train
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_fa
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	DELETE FROM #temp_df_train
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_train
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Split for offensive cohort...
+
+	TEMP TABLES:
+		#temp_df_fa
+		#temp_df_train_temp
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_train_temp exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_temp') IS NOT NULL
+		DROP TABLE #temp_df_train_temp
+
+	SELECT unique_id
+		,nfl_player_id
+		,bane_player_id
+		,nfl_contract_id
+		,is_free_agent
+		,rookie_contract
+		,signed_in_first_3_seasons
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,CASE WHEN is_free_agent = 1 THEN NULL ELSE free_agent_weeks END AS free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,player_max_weeks
+	INTO #temp_df_train_temp
+	FROM #temp_df_clean
+
+
+	-- Check if #temp_df_clean_offense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_offense') IS NOT NULL
+		DROP TABLE #temp_df_clean_offense
+
+	SELECT *
+		,CASE WHEN position_blt = 'QB' THEN 1 ELSE 0 END AS position_blt_QB
+		,CASE WHEN position_blt = 'RB' THEN 1 ELSE 0 END AS position_blt_RB
+		,CASE WHEN position_blt = 'FB' THEN 1 ELSE 0 END AS position_blt_FB
+		,CASE WHEN position_blt = 'WR' THEN 1 ELSE 0 END AS position_blt_WR
+		,CASE WHEN position_blt = 'TE' THEN 1 ELSE 0 END AS position_blt_TE
+		,CASE WHEN position_blt = 'OT' THEN 1 ELSE 0 END AS position_blt_OT
+		,CASE WHEN position_blt = 'OG' THEN 1 ELSE 0 END AS position_blt_OG
+		,CASE WHEN position_blt = 'OC' THEN 1 ELSE 0 END AS position_blt_OC
+		,CASE WHEN position_blt = 'DL' THEN 1 ELSE 0 END AS position_blt_DL
+		,CASE WHEN position_blt = 'OB' THEN 1 ELSE 0 END AS position_blt_OB
+		,CASE WHEN position_blt = 'IB' THEN 1 ELSE 0 END AS position_blt_IB
+		,CASE WHEN position_blt = 'DC' THEN 1 ELSE 0 END AS position_blt_DC
+		,CASE WHEN position_blt = 'DS' THEN 1 ELSE 0 END AS position_blt_DS
+	INTO #temp_df_clean_offense
+	FROM #temp_df_clean
+	WHERE position_blt IN ('QB','RB','FB','TE','WR','OC','OG','OT')
+
+
+	-- Check if #temp_df_train_offense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_offense') IS NOT NULL
+		DROP TABLE #temp_df_train_offense
+
+	SELECT *
+		,CASE WHEN position_blt = 'QB' THEN 1 ELSE 0 END AS position_blt_QB
+		,CASE WHEN position_blt = 'RB' THEN 1 ELSE 0 END AS position_blt_RB
+		,CASE WHEN position_blt = 'FB' THEN 1 ELSE 0 END AS position_blt_FB
+		,CASE WHEN position_blt = 'WR' THEN 1 ELSE 0 END AS position_blt_WR
+		,CASE WHEN position_blt = 'TE' THEN 1 ELSE 0 END AS position_blt_TE
+		,CASE WHEN position_blt = 'OT' THEN 1 ELSE 0 END AS position_blt_OT
+		,CASE WHEN position_blt = 'OG' THEN 1 ELSE 0 END AS position_blt_OG
+		,CASE WHEN position_blt = 'OC' THEN 1 ELSE 0 END AS position_blt_OC
+		,CASE WHEN position_blt = 'DL' THEN 1 ELSE 0 END AS position_blt_DL
+		,CASE WHEN position_blt = 'OB' THEN 1 ELSE 0 END AS position_blt_OB
+		,CASE WHEN position_blt = 'IB' THEN 1 ELSE 0 END AS position_blt_IB
+		,CASE WHEN position_blt = 'DC' THEN 1 ELSE 0 END AS position_blt_DC
+		,CASE WHEN position_blt = 'DS' THEN 1 ELSE 0 END AS position_blt_DS
+	INTO #temp_df_train_offense
+	FROM #temp_df_train_temp
+	WHERE position_blt IN ('QB','RB','FB','TE','WR','OC','OG','OT')
+
+
+	ALTER TABLE #temp_df_train_offense
+	DROP COLUMN nfl_contract_id--, nfl_player_id, bane_player_id, position_blt, position_group
+
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## OFFENSE
+
+
+	## separate out free agents, rookie contracts, and first three season contract into their own table
+
+	TEMP TABLES:
+		#temp_df_fa_offense
+		#temp_df_train_offense
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_fa_offense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_fa_offense') IS NOT NULL
+		DROP TABLE #temp_df_fa_offense
+
+	SELECT *
+	INTO #temp_df_fa_offense
+	FROM #temp_df_train_offense
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_fa_offense
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	DELETE FROM #temp_df_train_offense
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_train_offense
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## DVOA
+
+
+	TEMP TABLES:
+		#temp_dvoa
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_dvoa exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_dvoa') IS NOT NULL
+		DROP TABLE #temp_dvoa
+
+	CREATE TABLE #temp_dvoa (
+		bane_id INT
+		,season INT
+		,dyar INT
+		,dvoa FLOAT
+		,effective_yards INT
+		,dyar_rush INT
+		,dvoa_rush FLOAT
+		,effective_yards_rush INT
+		,date_accessed DATETIME
+		,[week] INT
+		,dvoa_type NVARCHAR(10)
+	)
+
+--QB PASS
+	INSERT INTO #temp_dvoa
+	SELECT fop.bane_id
+		,fop.season
+		,fop.dyar
+		,fop.dvoa
+		,fop.effective_yards
+		,NULL AS dyar_rush
+		,NULL AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,fop.date_accessed
+		,NULL AS [week]
+		,'qb_pass' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_qb_pass fop
+	UNION
+		SELECT pl.id AS bane_id
+			,f.season
+			,f.dyar
+			,f.dvoa
+			,f.eyds AS effective_yards
+			,NULL AS dyar_rush
+			,NULL AS dvoa_rush
+			,NULL AS effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'qb_pass' AS dvoa_type
+		FROM Coaching.dbo.extract_qb_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+--QB RUSH
+	INSERT INTO #temp_dvoa
+	SELECT [for].bane_id
+		,[for].season
+		,NULL AS dyar
+		,NULL AS dvoa
+		,NULL AS effective_yards
+		,[for].dyar AS dyar_rush
+		,[for].dvoa AS dvoa_rush
+		,[for].effective_yards AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'qb_rush' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_qb_rush [for]
+	UNION
+		SELECT pl.id as bane_id
+			,f.season
+			,NULL AS dyar
+			,NULL AS dvoa
+			,NULL AS effective_yards
+			,f.dyar_rushing as dyar_rush
+			,f.dvoa_rushing as dvoa_rush
+			,f.eyds_rushing as effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'qb_rush' AS dvoa_type
+		FROM Coaching.dbo.extract_qb_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+--RB PASS
+	INSERT INTO #temp_dvoa
+	SELECT fop.bane_id
+		,fop.season
+		,fop.dyar
+		,fop.dvoa
+		,fop.effective_yards
+		,NULL AS dyar_rush
+		,NULL AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'rb_pass' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_rb_pass fop
+	UNION
+		SELECT pl.id AS bane_id
+			,f.season
+			,f.dyar_receiving AS dyar
+			,f.dvoa_receiving AS dvoa
+			,f.eyds_receiving AS effective_yards
+			,NULL AS dyar_rush
+			,NULL AS dvoa_rush
+			,NULL AS effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'rb_pass' AS dvoa_type
+		FROM Coaching.dbo.extract_rb_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+--RB RUSH
+	INSERT INTO #temp_dvoa
+	SELECT [for].bane_id
+		,[for].season
+		,NULL AS dyar
+		,NULL AS dvoa
+		,NULL AS effective_yards
+		,[for].dyar AS dyar_rush
+		,[for].dvoa AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'rb_rush' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_rb_rush [for]
+	UNION
+		SELECT pl.id AS bane_id
+			,f.season
+			,NULL AS dyar
+			,NULL AS dvoa
+			,NULL AS effective_yards
+			,f.dyar AS dyar_rush
+			,f.dvoa AS dvoa_rush
+			,NULL AS effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'rb_rush' AS dvoa_type
+		FROM Coaching.dbo.extract_rb_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+
+--WR PASS
+	INSERT INTO #temp_dvoa
+	SELECT fop.bane_id
+		,fop.season
+		,fop.dyar
+		,fop.dvoa
+		,fop.effective_yards
+		,NULL AS dyar_rush
+		,NULL AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'wr_pass' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_wr_pass fop
+	UNION
+		SELECT pl.id as bane_id
+			,f.season
+			,f.dyar
+			,f.dvoa
+			,f.eyds as effective_yards
+			,NULL AS dyar_rush
+			,NULL AS dvoa_rush
+			,NULL AS effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'wr_pass' AS dvoa_type
+		FROM Coaching.dbo.extract_wr_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+
+--WR RUSH
+	INSERT INTO #temp_dvoa
+	SELECT [for].bane_id
+		,[for].season
+		,NULL AS dyar
+		,NULL AS dvoa
+		,NULL AS effective_yards
+		,[for].dyar AS dyar_rush
+		,[for].dvoa AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'wr_rush' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_wr_rush [for]
+	UNION
+		SELECT pl.id AS bane_id
+			,f.season
+			,NULL AS dyar
+			,NULL AS dvoa
+			,NULL AS effective_yards
+			,f.dyar_rushing AS dyar_rush
+			,f.dvoa_rushing AS dvoa_rush
+			,NULL AS effective_yards_rush
+			,CURRENT_TIMESTAMP AS date_accessed
+			,[week]
+			,'wr_rush' AS dvoa_type
+		FROM Coaching.dbo.extract_wr_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+
+--TE PASS
+	INSERT INTO #temp_dvoa
+	SELECT fop.bane_id
+		,fop.season
+		,fop.dyar
+		,fop.dvoa
+		,fop.effective_yards
+		,NULL AS dyar_rush
+		,NULL AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,date_accessed
+		,NULL AS [week]
+		,'te_pass' AS dvoa_type
+	FROM Analytics.dbo.football_outsiders_te fop
+	UNION
+		SELECT pl.id AS bane_id
+		,f.season
+		,f.dyar
+		,f.dvoa
+		,f.eyds as effective_yards
+		,NULL AS dyar_rush
+		,NULL AS dvoa_rush
+		,NULL AS effective_yards_rush
+		,CURRENT_TIMESTAMP AS date_accessed
+		,[week]
+		,'te_pass' AS dvoa_type
+		FROM Coaching.dbo.extract_te_dvoa f
+		LEFT JOIN BaneProductionAnalytics.dbo.players pl
+			ON pl.nfl_id = f.gsis_player_id
+			AND pl.is_deleted = 0
+
+
+	-- Check if #temp_dvoa_orders exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_dvoa_orders') IS NOT NULL
+		DROP TABLE #temp_dvoa_orders
+
+	SELECT bane_id
+		,season
+		,dyar AS dyar_per
+		,dvoa AS dvoa_per
+		,effective_yards AS eff_yards_per
+		,dyar_rush AS dyar_rush_per
+		,dvoa_rush AS dvoa_rush_per
+		,effective_yards_rush AS eff_yards_rush_per
+		,ROW_NUMBER() OVER (PARTITION BY bane_id, season, dvoa_type ORDER BY date_accessed DESC, [week] DESC) AS dvoa_order
+	INTO #temp_dvoa_orders
+	FROM #temp_dvoa
+	
+
+	-- Check if #temp_dvoa_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_dvoa_stats') IS NOT NULL
+		DROP TABLE #temp_dvoa_stats
+
+	SELECT bane_id
+		,season
+		,MAX(dyar_per) AS dyar_per
+		,MAX(dvoa_per) AS dvoa_per
+		,MAX(eff_yards_per) AS eff_yards_per
+		,MAX(dyar_rush_per) AS dyar_rush_per
+		,MAX(dvoa_rush_per) AS dvoa_rush_per
+		,MAX(eff_yards_rush_per) AS eff_yards_rush_per
+	INTO #temp_dvoa_stats
+	FROM #temp_dvoa_orders
+	WHERE dvoa_order = 1
+	GROUP BY bane_id
+		,season
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Fantasy
+
+
+	TEMP TABLES:
+		#temp_fantasy_points
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_fantasy_points exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_fantasy_points') IS NOT NULL
+		DROP TABLE #temp_fantasy_points
+
+	SELECT pl.id AS bane_id
+		,season
+		,FantPt AS fantasy_points
+		,VBD AS fantasy_value_to_baseline_vbd
+		,CAST(FantPt AS FLOAT) / NULLIF((PassingAtt + RushingAtt + Tgt),0) AS fantasy_points_per
+		,CAST(VBD AS FLOAT) / NULLIF((PassingAtt + RushingAtt + Tgt),0)  AS fantasy_to_base_per
+		,ROW_NUMBER() OVER (PARTITION BY gsis_player_id, Season ORDER BY [week] DESC) AS fantasy_order
+	INTO #temp_fantasy_points
+	FROM Coaching.dbo.extract_pro_football_reference pfr
+	LEFT JOIN BaneProductionAnalytics.dbo.players pl
+		ON pfr.gsis_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	WHERE Season >= 2020
+
+
+	DELETE FROM #temp_fantasy_points
+	WHERE fantasy_order > 1
+
+
+	INSERT INTO #temp_fantasy_points
+	SELECT bane_id
+		,season
+		,fantasy_points
+		,fantasy_value_to_baseline_vbd
+		,CAST(fantasy_points AS FLOAT) / NULLIF(pass_attempts + rush_attempts + receiving_targets,0) AS fantasy_points_per
+		,CAST(fantasy_points AS FLOAT) / NULLIF(pass_attempts + rush_attempts + receiving_targets,0) AS fantasy_to_base_per
+		,1 AS fantasy_order 
+	FROM Analytics.dbo.fantasy_football_statistics
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## 538 Elo
+
+
+	TEMP TABLES:
+		#temp_five
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_five exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_five') IS NOT NULL
+		DROP TABLE #temp_five
+
+	SELECT [date]
+		,bane_id
+		,season
+		,ISNULL(qb_value_post,qb_value_pre) AS qb_elo
+	INTO #temp_five
+	FROM Analytics.dbo.fivethirtyeight_qb_elo
+
+
+	INSERT INTO #temp_five
+	SELECT f.[date]
+		,pl.id AS bane_id
+		,f.season
+		,ISNULL(f.qb_home_value_post,f.qb_home_value_pre) AS qb_elo
+	FROM Coaching.dbo.extract_fivethirtyeight_elo f
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON pl.nfl_id = f.qb_home_gsis
+		AND pl.is_deleted = 0
+	WHERE season >= 2004
+		AND f.[date] <= GETDATE()
+
+	INSERT INTO #temp_five
+	SELECT f.[date]
+		,pl.id AS bane_id
+		,f.season
+		,ISNULL(f.qb_visit_value_post,f.qb_visit_value_pre) AS qb_elo
+	FROM Coaching.dbo.extract_fivethirtyeight_elo f
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON pl.nfl_id = f.qb_visit_gsis
+		AND pl.is_deleted = 0
+	WHERE season >= 2004
+		AND f.[date] <= GETDATE()
+
+
+	-- Check if #temp_538_elos exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_538_elos') IS NOT NULL
+		DROP TABLE #temp_538_elos
+
+	SELECT *
+		,ROW_NUMBER() OVER (PARTITION BY bane_id, season ORDER BY [date] DESC) AS elo_order
+	INTO #temp_538_elos
+	FROM #temp_five
+
+	DELETE FROM #temp_538_elos
+	WHERE elo_order > 1
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## EPA
+
+
+	TEMP TABLES:
+		#temp_epa
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_epa_defense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_epa_defense') IS NOT NULL
+		DROP TABLE #temp_epa_defense
+
+	 SELECT pl.season
+		 ,db.gsis_player_id AS nfl_player_id
+		 ,AVG(pl.expected_points_added) AS epa_coverage
+	INTO #temp_epa_defense
+	FROM PFFUltimate.dbo.plays pl
+	INNER JOIN PFFUltimate.dbo.defense db
+		ON pl.play_id = db.play_id
+		AND db.primary_coverage = 'TRUE'
+	WHERE season >= 2007
+		AND run_pass = 'P'
+	GROUP BY pl.season
+		,db.gsis_player_id
+	HAVING COUNT(*) > 10
+
+
+	-- Check if #temp_epa exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_epa') IS NOT NULL
+		DROP TABLE #temp_epa
+
+	 SELECT pl.season
+		 ,qb.gsis_player_id
+		 ,SUM(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_sum
+		 ,COUNT(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_count
+		 ,SUM(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_sum
+		 ,COUNT(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_count
+	INTO #temp_epa
+	FROM PFFUltimate.dbo.plays pl
+	INNER JOIN PFFUltimate.dbo.offense qb
+		ON qb.play_id = pl.play_id
+		AND qb.[role] = 'PASS'
+	WHERE season >= 2007
+		AND run_pass IN ('P','R')
+	GROUP BY pl.season
+		,qb.gsis_player_id
+
+
+	INSERT INTO #temp_epa
+	SELECT pl.season
+		,rb.gsis_player_id
+		,SUM(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_sum
+		,COUNT(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_count
+		,SUM(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_sum
+		,COUNT(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_count
+	FROM PFFUltimate.dbo.plays pl
+	INNER JOIN PFFUltimate.dbo.offense rb
+		ON rb.play_id = pl.play_id
+		AND rb.ball_carrier = 'TRUE' 
+	WHERE season >= 2007
+		AND run_pass IN ('P','R')
+	GROUP BY pl.season
+		,rb.gsis_player_id
+
+
+	INSERT INTO #temp_epa
+	SELECT pl.season
+		,wr.gsis_player_id
+		,SUM(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_sum
+		,COUNT(CASE WHEN run_pass = 'P' THEN pl.expected_points_added ELSE NULL END) AS epa_pass_count
+		,SUM(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_sum
+		,COUNT(CASE WHEN run_pass = 'R' THEN pl.expected_points_added ELSE NULL END) AS epa_rush_count
+	FROM PFFUltimate.dbo.plays pl
+	INNER JOIN PFFUltimate.dbo.offense wr
+		ON wr.play_id = pl.play_id
+		AND wr.targeted_receiver = 'TRUE'
+	WHERE season >= 2007
+		AND run_pass IN ('P','R')
+	GROUP BY pl.season
+		,wr.gsis_player_id
+	 
+
+	-- Check if #temp_epa_offense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_epa_offense') IS NOT NULL
+		DROP TABLE #temp_epa_offense
+
+	SELECT season
+		,gsis_player_id
+		,CASE WHEN SUM(epa_pass_count) > 5 THEN CAST(SUM(epa_pass_sum) AS FLOAT) / ISNULL(SUM(epa_pass_count),0) ELSE NULL END AS epa_pass
+		,CASE WHEN SUM(epa_rush_count) > 5 THEN CAST(SUM(epa_rush_sum) AS FLOAT) / ISNULL(SUM(epa_rush_count),0) ELSE NULL END AS epa_rush
+	INTO #temp_epa_offense
+	FROM #temp_epa
+	GROUP BY season
+		,gsis_player_id
+	HAVING SUM(epa_pass_count) > 5
+		OR SUM(epa_rush_count) > 5
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	##CPOE - use predictions saved on computer for now until DB is updated.
+
+
+	TEMP TABLES:
+		#temp_cpoe
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_cpoe exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_cpoe') IS NOT NULL
+		DROP TABLE #temp_cpoe
+	 
+	 SELECT nfl_id AS nfl_player_id
+		,season
+		,cpoe
+		,n
+	 INTO #temp_cpoe
+	 FROM AnalyticsSandbox.dbo.cpoe_cayoe_pro_time_of_throw 
+	 WHERE position_model <> 'WR'
+	 UNION
+		SELECT nfl_id AS nfl_player_id
+		,season
+		,cpoe
+		,n
+		FROM AnalyticsSandbox.dbo.cpoe_cayoe_pro_post_throw
+		WHERE position_model = 'WR'
+	 
+	
+	-- Check if #temp_cpoe_orders exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_cpoe_orders') IS NOT NULL
+		DROP TABLE #temp_cpoe_orders
+
+	SELECT *
+		,ROW_NUMBER() OVER (PARTITION BY nfl_player_id, season ORDER BY n DESC, cpoe DESC) AS cpoe_order
+	INTO #temp_cpoe_orders
+	FROM #temp_cpoe
+
+
+	DELETE FROM #temp_cpoe_orders
+	WHERE cpoe_order > 1
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## All variables are rescaled at this point.
+	## Our data frames are:
+	## fo - football outsiders rankings
+	## fantasy - fantasy production and per opportunity ranks from football referense
+	## epa - epa pass and rush values
+	## cpoe - completion percentage above expectation per mixed model from 
+
+
+	TEMP TABLES:
+		#temp_advanced_stats
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_advanced_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_advanced_stats') IS NOT NULL
+		DROP TABLE #temp_advanced_stats
+
+	SELECT rs.nfl_player_id
+		,rs.season
+		,si.[name]
+		,rs.statistic_z_score
+	INTO #temp_advanced_stats
+	FROM Analytics.dbo.r_output_regressed_statistics rs
+	LEFT JOIN Analytics.dbo.map_regressed_statistic_type si 
+		ON si.id = rs.statistic_id
+	WHERE rs.season >= 2007
+		AND rs.rolling_game_stats = 0
+		AND rs.season_type_adjusted = 'REGPOST'
+		AND si.[name] IN ('disruptions_allowed','run_block_wins')
+
+
+	-- Check if #temp_advanced_stats_pivot exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_advanced_stats_pivot') IS NOT NULL
+		DROP TABLE #temp_advanced_stats_pivot
+	
+	SELECT nfl_player_id
+		,season
+		,[disruptions_allowed]
+		,[run_block_wins]
+	INTO #temp_advanced_stats_pivot
+	FROM (
+	SELECT nfl_player_id
+		,season
+		,[name]
+		,statistic_z_score
+	FROM #temp_advanced_stats WHERE [name] IN ('disruptions_allowed','run_block_wins')) up
+	PIVOT (MAX(statistic_z_score) FOR [name] IN ([disruptions_allowed],[run_block_wins])) AS pvt
+
+	
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join back to training
+
+
+	TEMP TABLES:
+		#temp_df_train_offense_joined
+		#temp_df_fa_offense_joined
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_train_offense_joined exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_offense_joined') IS NOT NULL
+		DROP TABLE #temp_df_train_offense_joined
+
+	SELECT unique_id
+		,df.nfl_player_id
+		,true_apy_percent
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,df.season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,player_max_weeks
+		,position_blt
+		,position_group
+		,position_blt_FB
+		,position_blt_OC
+		,position_blt_OG
+		,position_blt_OT
+		,position_blt_QB
+		,position_blt_RB
+		,position_blt_TE
+		,position_blt_WR
+		,dyar_per
+		,dvoa_per
+		,eff_yards_per
+		,dyar_rush_per
+		,dvoa_rush_per
+		,eff_yards_rush_per
+		,fantasy_points
+		,fantasy_value_to_baseline_vbd
+		,fantasy_points_per
+		,fantasy_to_base_per
+		,qb_elo
+		,epa_pass
+		,epa_rush
+		,cpoe
+		,disruptions_allowed
+		,run_block_wins
+		,0 AS predicted_all
+		,0 AS exclude_from_training
+	INTO #temp_df_train_offense_joined
+	FROM #temp_df_train_offense df
+	LEFT JOIN #temp_dvoa_stats dv
+		ON df.bane_player_id = dv.bane_id
+		AND df.season = dv.season
+	LEFT JOIN #temp_fantasy_points fp
+		ON df.bane_player_id = fp.bane_id
+		AND df.season = fp.season
+	LEFT JOIN #temp_538_elos fi
+		ON df.bane_player_id = fi.bane_id
+		AND df.season = fi.season
+	LEFT JOIN #temp_epa_offense ep
+		ON df.nfl_player_id = ep.gsis_player_id
+		AND df.season = ep.season
+	LEFT JOIN #temp_cpoe_orders cp
+		ON df.nfl_player_id = cp.nfl_player_id
+		AND df.season = cp.season
+	LEFT JOIN #temp_advanced_stats_pivot ad
+		ON df.nfl_player_id = ad.nfl_player_id
+		AND df.season = ad.season
+	ORDER BY unique_id
+
+
+	-- Check if #temp_df_fa_offense_joined exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_fa_offense_joined') IS NOT NULL
+		DROP TABLE #temp_df_fa_offense_joined
+
+	SELECT unique_id
+		,df.nfl_player_id
+		,true_apy_percent
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,df.season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,player_max_weeks
+		,position_blt
+		,position_group
+		,position_blt_FB
+		,position_blt_OC
+		,position_blt_OG
+		,position_blt_OT
+		,position_blt_QB
+		,position_blt_RB
+		,position_blt_TE
+		,position_blt_WR
+		,dyar_per
+		,dvoa_per
+		,eff_yards_per
+		,dyar_rush_per
+		,dvoa_rush_per
+		,eff_yards_rush_per
+		,fantasy_points
+		,fantasy_value_to_baseline_vbd
+		,fantasy_points_per
+		,fantasy_to_base_per
+		,qb_elo
+		,epa_pass
+		,epa_rush
+		,cpoe
+		,disruptions_allowed
+		,run_block_wins
+		,0 AS predicted_all
+		,1 AS exclude_from_training
+	INTO #temp_df_fa_offense_joined
+	FROM #temp_df_fa_offense df
+	LEFT JOIN #temp_dvoa_stats dv
+		ON df.bane_player_id = dv.bane_id
+		AND df.season = dv.season
+	LEFT JOIN #temp_fantasy_points fp
+		ON df.bane_player_id = fp.bane_id
+		AND df.season = fp.season
+	LEFT JOIN #temp_538_elos fi
+		ON df.bane_player_id = fi.bane_id
+		AND df.season = fi.season
+	LEFT JOIN #temp_epa_offense ep
+		ON df.nfl_player_id = ep.gsis_player_id
+		AND df.season = ep.season
+	LEFT JOIN #temp_cpoe_orders cp
+		ON df.nfl_player_id = cp.nfl_player_id
+		AND df.season = cp.season
+	LEFT JOIN #temp_advanced_stats_pivot ad
+		ON df.nfl_player_id = ad.nfl_player_id
+		AND df.season = ad.season
+	ORDER BY unique_id
+
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Split for defensive cohort...
+
+	TEMP TABLES:
+		#temp_df_fa
+		#temp_df_train_temp
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_clean_defense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_clean_defense') IS NOT NULL
+		DROP TABLE #temp_df_clean_defense
+
+	SELECT *
+		,CASE WHEN position_blt = 'QB' THEN 1 ELSE 0 END AS position_blt_QB
+		,CASE WHEN position_blt = 'RB' THEN 1 ELSE 0 END AS position_blt_RB
+		,CASE WHEN position_blt = 'FB' THEN 1 ELSE 0 END AS position_blt_FB
+		,CASE WHEN position_blt = 'WR' THEN 1 ELSE 0 END AS position_blt_WR
+		,CASE WHEN position_blt = 'TE' THEN 1 ELSE 0 END AS position_blt_TE
+		,CASE WHEN position_blt = 'OT' THEN 1 ELSE 0 END AS position_blt_OT
+		,CASE WHEN position_blt = 'OG' THEN 1 ELSE 0 END AS position_blt_OG
+		,CASE WHEN position_blt = 'OC' THEN 1 ELSE 0 END AS position_blt_OC
+		,CASE WHEN position_blt = 'DL' THEN 1 ELSE 0 END AS position_blt_DL
+		,CASE WHEN position_blt = 'OB' THEN 1 ELSE 0 END AS position_blt_OB
+		,CASE WHEN position_blt = 'IB' THEN 1 ELSE 0 END AS position_blt_IB
+		,CASE WHEN position_blt = 'DC' THEN 1 ELSE 0 END AS position_blt_DC
+		,CASE WHEN position_blt = 'DS' THEN 1 ELSE 0 END AS position_blt_DS
+	INTO #temp_df_clean_defense
+	FROM #temp_df_clean
+	WHERE position_blt IN ('DL','DC','DS','OB','IB')
+
+
+	-- Check if #temp_df_train_defense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_defense') IS NOT NULL
+		DROP TABLE #temp_df_train_defense
+
+	SELECT *
+		,CASE WHEN position_blt = 'QB' THEN 1 ELSE 0 END AS position_blt_QB
+		,CASE WHEN position_blt = 'RB' THEN 1 ELSE 0 END AS position_blt_RB
+		,CASE WHEN position_blt = 'FB' THEN 1 ELSE 0 END AS position_blt_FB
+		,CASE WHEN position_blt = 'WR' THEN 1 ELSE 0 END AS position_blt_WR
+		,CASE WHEN position_blt = 'TE' THEN 1 ELSE 0 END AS position_blt_TE
+		,CASE WHEN position_blt = 'OT' THEN 1 ELSE 0 END AS position_blt_OT
+		,CASE WHEN position_blt = 'OG' THEN 1 ELSE 0 END AS position_blt_OG
+		,CASE WHEN position_blt = 'OC' THEN 1 ELSE 0 END AS position_blt_OC
+		,CASE WHEN position_blt = 'DL' THEN 1 ELSE 0 END AS position_blt_DL
+		,CASE WHEN position_blt = 'OB' THEN 1 ELSE 0 END AS position_blt_OB
+		,CASE WHEN position_blt = 'IB' THEN 1 ELSE 0 END AS position_blt_IB
+		,CASE WHEN position_blt = 'DC' THEN 1 ELSE 0 END AS position_blt_DC
+		,CASE WHEN position_blt = 'DS' THEN 1 ELSE 0 END AS position_blt_DS
+	INTO #temp_df_train_defense
+	FROM #temp_df_train_temp
+	WHERE position_blt IN ('DL','DC','DS','OB','IB')
+
+
+	ALTER TABLE #temp_df_train_defense
+	DROP COLUMN nfl_contract_id--, nfl_player_id, bane_player_id, position_group, position_blt
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## DEFENSE
+
+
+	## separate out free agents, rookie contracts, and first three season contract into their own table
+
+	TEMP TABLES:
+		#temp_df_fa_defense
+		#temp_df_train_defense
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_fa_defense exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_fa_defense') IS NOT NULL
+		DROP TABLE #temp_df_fa_defense
+
+	SELECT *
+	INTO #temp_df_fa_defense
+	FROM #temp_df_train_defense
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_fa_defense
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	DELETE FROM #temp_df_train_defense
+	WHERE (is_free_agent = 1 OR is_free_agent IS NULL)
+		OR (rookie_contract = 1 OR rookie_contract IS NULL)
+		OR (signed_in_first_3_seasons = 1 OR signed_in_first_3_seasons IS NULL)
+
+	ALTER TABLE #temp_df_train_defense
+	DROP COLUMN is_free_agent, rookie_contract, signed_in_first_3_seasons
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## May want simple counting stats later on
+	#select top 10 * from Analytics.dbo.r_input_stats_passing 
+	#where position_blt = 'QB' and quarterback_sum > 100 and season > 2017 and rolling_game_stats = 0
+
+
+	TEMP TABLES:
+		#temp_advanced_stats
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_advanced_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_advanced_stats') IS NOT NULL
+		DROP TABLE #temp_advanced_stats
+
+	SELECT rs.nfl_player_id
+		,rs.season
+		,si.[name]
+		,rs.statistic_z_score
+	INTO #temp_advanced_stats
+	FROM Analytics.dbo.r_output_regressed_statistics rs
+	LEFT JOIN Analytics.dbo.map_regressed_statistic_type si 
+		ON si.id = rs.statistic_id
+	WHERE rs.season >= 2007
+		AND rs.rolling_game_stats = 0
+		AND rs.season_type_adjusted = 'REGPOST'
+		AND si.[name] IN ('close_on_ball_percentage','completion_yards_against','disruption_rate','extra_tackles','pbu_percentage','run_defense_wins','rush_yards_against','stop_rate')
+
+
+	-- Check if #temp_advanced_stats_pivot exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_advanced_stats_pivot') IS NOT NULL
+		DROP TABLE #temp_advanced_stats_pivot
+	
+	SELECT nfl_player_id
+		,season
+		,[close_on_ball_percentage]
+		,[completion_yards_against]
+		,[disruption_rate]
+		,[extra_tackles]
+		,[pbu_percentage]
+		,[run_defense_wins]
+		,[rush_yards_against]
+		,[stop_rate]
+	INTO #temp_advanced_stats_pivot
+	FROM (
+	SELECT nfl_player_id
+		,season
+		,[name]
+		,statistic_z_score
+	FROM #temp_advanced_stats WHERE [name] IN ('close_on_ball_percentage','completion_yards_against','disruption_rate','extra_tackles','pbu_percentage','run_defense_wins','rush_yards_against','stop_rate')) up
+	PIVOT (MAX(statistic_z_score) FOR [name] IN ([close_on_ball_percentage],[completion_yards_against],[disruption_rate],[extra_tackles],[pbu_percentage],[run_defense_wins],[rush_yards_against],[stop_rate])) AS pvt
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Get tackles, interceptions, pressures and fumbles forced.
+
+	TEMP TABLES:
+		#temp_tackling_stats
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_tackling_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_tackling_stats') IS NOT NULL
+		DROP TABLE #temp_tackling_stats
+
+	SELECT nfl_player_id
+		,season
+		,CAST(tackle_4_way_sum AS FLOAT) / play_count_sum AS tackles_per_snap
+		,CAST(tackle_runs_sum - tackle_probability_derrick_sum AS FLOAT) / play_count_run_sum AS extra_tackles
+	INTO #temp_tackling_stats
+	FROM  Analytics.dbo.r_input_stats_tackling
+	WHERE season >= 2007
+		AND rolling_game_stats = 0
+		AND season_type_adjusted = 'REGPOST'
+		and play_count_sum > 0
+
+
+	-- Check if #temp_coverage_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_coverage_stats') IS NOT NULL
+		DROP TABLE #temp_coverage_stats
+
+	SELECT nfl_player_id
+		,season
+		,CAST(targeted_defender_primary_sum AS FLOAT) / play_count_pass_sum AS targetted_rate
+		,CAST(interception_sum AS FLOAT) / NULLIF(targeted_defender_primary_sum,0) AS interception_rate
+		,ISNULL(CAST(completion_allowed_brv_sum AS FLOAT) / NULLIF(targeted_defender_primary_sum,0),0) AS completion_rate
+	INTO #temp_coverage_stats
+	FROM Analytics.dbo.r_input_stats_coverage
+	WHERE season >= 2007
+		AND rolling_game_stats = 0
+		AND season_type_adjusted = 'REGPOST'
+		AND play_count_pass_sum > 0
+
+
+	-- Check if #temp_rush_stats exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_rush_stats') IS NOT NULL
+		DROP TABLE #temp_rush_stats
+
+	SELECT nfl_player_id
+		,season
+		,ISNULL(CAST(qb_pressure_sum AS FLOAT) / play_count_pass_sum,0) AS pressure_rate
+        ,ISNULL(CAST(qb_sack_sum AS FLOAT) / play_count_pass_sum,0) AS sack_rate
+	INTO #temp_rush_stats
+	FROM Analytics.dbo.r_input_stats_pass_rush
+	WHERE season >= 2007
+		AND rolling_game_stats = 0
+		AND season_type_adjusted = 'REGPOST'
+		AND play_count_pass_sum > 0
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Get additional CB metrics from Corey's new table.
+
+	TEMP TABLES:
+		#temp_df_cbs
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_cbs exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_cbs') IS NOT NULL
+		DROP TABLE #temp_df_cbs
+
+	SELECT nfl_player_id
+		,season
+		,CAST(SUM(expected_points_allowed) AS FLOAT) / NULLIF(SUM(coverage_snaps),0) AS expected_points_allowed
+		,ISNULL(CAST(SUM(dpi_holdings) AS FLOAT) / NULLIF(SUM(snap_count_defense_no_garbage),0),0) AS dpi_holdings
+		,CAST(SUM(covered_receiver_grades) AS FLOAT) / NULLIF(SUM(covered_receiver_plays),0) AS receiver_grades
+	INTO #temp_df_cbs
+	FROM AnalyticsSandbox.dbo.corey_cb_game_grades
+	GROUP BY nfl_player_id
+		,season
+	
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Join back to training
+
+
+	TEMP TABLES:
+		#temp_df_train_defense_joined
+		#temp_df_fa_defense_joined
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_df_train_defense_joined exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_train_defense_joined') IS NOT NULL
+		DROP TABLE #temp_df_train_defense_joined
+
+	SELECT unique_id
+		,df.nfl_player_id
+		,true_apy_percent
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,df.season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,player_max_weeks
+		,position_blt
+		,position_group
+		,position_blt_DC
+		,position_blt_DL
+		,position_blt_DS
+		,position_blt_IB
+		,position_blt_OB
+		,close_on_ball_percentage
+		,completion_yards_against
+		,disruption_rate
+		,pbu_percentage
+		,run_defense_wins
+		,rush_yards_against
+		,stop_rate
+		,tackles_per_snap
+		,ts.extra_tackles
+		,targetted_rate
+		,interception_rate
+		,completion_rate
+		,pressure_rate
+		,sack_rate
+		,cpoe
+		,epa_coverage
+		,expected_points_allowed
+		,dpi_holdings
+		,receiver_grades
+		,0 AS predicted_all
+		,0 AS exclude_from_training
+	INTO #temp_df_train_defense_joined
+	FROM #temp_df_train_defense df
+	LEFT JOIN #temp_dvoa_stats dv
+		ON df.bane_player_id = dv.bane_id
+		AND df.season = dv.season
+	LEFT JOIN #temp_fantasy_points fp
+		ON df.bane_player_id = fp.bane_id
+		AND df.season = fp.season
+	LEFT JOIN #temp_538_elos fi
+		ON df.bane_player_id = fi.bane_id
+		AND df.season = fi.season
+	LEFT JOIN #temp_cpoe_orders cp
+		ON df.nfl_player_id = cp.nfl_player_id
+		AND df.season = cp.season
+	LEFT JOIN #temp_advanced_stats_pivot ad
+		ON df.nfl_player_id = ad.nfl_player_id
+		AND df.season = ad.season
+	LEFT JOIN #temp_tackling_stats ts
+		ON df.nfl_player_id = ts.nfl_player_id
+		AND df.season = ts.season
+	LEFT JOIN #temp_coverage_stats cs
+		ON df.nfl_player_id = cs.nfl_player_id
+		AND df.season = cs.season
+	LEFT JOIN #temp_rush_stats rs
+		ON df.nfl_player_id = rs.nfl_player_id
+		AND df.season = rs.season
+	LEFT JOIN #temp_df_cbs cb
+		ON df.nfl_player_id = cb.nfl_player_id
+		AND df.season = cb.season
+	LEFT JOIN #temp_epa_defense ep
+		ON df.nfl_player_id = ep.nfl_player_id
+		AND df.season = ep.season
+	ORDER BY unique_id
+
+	
+	-- Check if #temp_df_fa_defense_joined exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_df_fa_defense_joined') IS NOT NULL
+		DROP TABLE #temp_df_fa_defense_joined
+
+	SELECT unique_id
+		,df.nfl_player_id
+		,true_apy_percent
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,df.season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,player_max_weeks
+		,position_blt
+		,position_group
+		,position_blt_DC
+		,position_blt_DL
+		,position_blt_DS
+		,position_blt_IB
+		,position_blt_OB
+		,close_on_ball_percentage
+		,completion_yards_against
+		,disruption_rate
+		,pbu_percentage
+		,run_defense_wins
+		,rush_yards_against
+		,stop_rate
+		,tackles_per_snap
+		,ts.extra_tackles
+		,targetted_rate
+		,interception_rate
+		,completion_rate
+		,pressure_rate
+		,sack_rate
+		,cpoe
+		,epa_coverage
+		,expected_points_allowed
+		,dpi_holdings
+		,receiver_grades
+		,0 AS predicted_all
+		,1 AS exclude_from_training
+	INTO #temp_df_fa_defense_joined
+	FROM #temp_df_fa_defense df
+	LEFT JOIN #temp_dvoa_stats dv
+		ON df.bane_player_id = dv.bane_id
+		AND df.season = dv.season
+	LEFT JOIN #temp_fantasy_points fp
+		ON df.bane_player_id = fp.bane_id
+		AND df.season = fp.season
+	LEFT JOIN #temp_538_elos fi
+		ON df.bane_player_id = fi.bane_id
+		AND df.season = fi.season
+	LEFT JOIN #temp_cpoe_orders cp
+		ON df.nfl_player_id = cp.nfl_player_id
+		AND df.season = cp.season
+	LEFT JOIN #temp_advanced_stats_pivot ad
+		ON df.nfl_player_id = ad.nfl_player_id
+		AND df.season = ad.season
+	LEFT JOIN #temp_tackling_stats ts
+		ON df.nfl_player_id = ts.nfl_player_id
+		AND df.season = ts.season
+	LEFT JOIN #temp_coverage_stats cs
+		ON df.nfl_player_id = cs.nfl_player_id
+		AND df.season = cs.season
+	LEFT JOIN #temp_rush_stats rs
+		ON df.nfl_player_id = rs.nfl_player_id
+		AND df.season = rs.season
+	LEFT JOIN #temp_df_cbs cb
+		ON df.nfl_player_id = cb.nfl_player_id
+		AND df.season = cb.season
+	LEFT JOIN #temp_epa_defense ep
+		ON df.nfl_player_id = ep.nfl_player_id
+		AND df.season = ep.season
+	ORDER BY unique_id
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	## Model input table
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_model_pro_market_value_inputs exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_model_pro_market_value_inputs') IS NOT NULL
+		DROP TABLE #temp_model_pro_market_value_inputs
+
+	SELECT *
+	INTO #temp_model_pro_market_value_inputs
+	FROM AnalyticsDevelopment.dbo.model_pro_market_value_inputs
+	WHERE 0 = 1
+
+
+	INSERT INTO #temp_model_pro_market_value_inputs
+	SELECT unique_id
+		,nfl_player_id
+		,exclude_from_training
+		,predicted_all
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,position_blt_QB
+		,position_blt_RB
+		,position_blt_FB
+		,position_blt_WR
+		,position_blt_TE
+		,position_blt_OT
+		,position_blt_OG
+		,position_blt_OC
+		,0 AS position_blt_DL
+		,0 AS position_blt_OB
+		,0 AS position_blt_IB
+		,0 AS position_blt_DC
+		,0 AS position_blt_DS
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,NULL AS close_on_ball_percentage
+		,NULL AS completion_yards_against
+		,NULL AS disruption_rate
+		,NULL AS pbu_percentage
+		,NULL AS run_defense_wins
+		,NULL AS rush_yards_against
+		,NULL AS stop_rate
+		,NULL AS tackles_per_snap
+		,NULL AS extra_tackles
+		,NULL AS targetted_rate
+		,NULL AS interception_rate
+		,NULL AS completion_rate
+		,NULL AS pressure_rate
+		,NULL AS sack_rate
+		,cpoe
+		,NULL AS epa_coverage
+		,NULL AS expected_points_allowed
+		,NULL AS dpi_holdings
+		,NULL AS receiver_grades
+		,dyar_per
+		,dvoa_per
+		,eff_yards_per
+		,dyar_rush_per
+		,dvoa_rush_per
+		,eff_yards_rush_per
+		,fantasy_points
+		,fantasy_value_to_baseline_vbd
+		,fantasy_points_per
+		,fantasy_to_base_per
+		,qb_elo
+		,epa_pass
+		,epa_rush
+		,disruptions_allowed
+		,run_block_wins
+	FROM #temp_df_train_offense_joined
+
+
+
+
+
+	INSERT INTO #temp_model_pro_market_value_inputs
+	SELECT unique_id
+		,nfl_player_id
+		,exclude_from_training
+		,predicted_all
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,position_blt_QB
+		,position_blt_RB
+		,position_blt_FB
+		,position_blt_WR
+		,position_blt_TE
+		,position_blt_OT
+		,position_blt_OG
+		,position_blt_OC
+		,0 AS position_blt_DL
+		,0 AS position_blt_OB
+		,0 AS position_blt_IB
+		,0 AS position_blt_DC
+		,0 AS position_blt_DS
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,NULL AS close_on_ball_percentage
+		,NULL AS completion_yards_against
+		,NULL AS disruption_rate
+		,NULL AS pbu_percentage
+		,NULL AS run_defense_wins
+		,NULL AS rush_yards_against
+		,NULL AS stop_rate
+		,NULL AS tackles_per_snap
+		,NULL AS extra_tackles
+		,NULL AS targetted_rate
+		,NULL AS interception_rate
+		,NULL AS completion_rate
+		,NULL AS pressure_rate
+		,NULL AS sack_rate
+		,cpoe
+		,NULL AS epa_coverage
+		,NULL AS expected_points_allowed
+		,NULL AS dpi_holdings
+		,NULL AS receiver_grades
+		,dyar_per
+		,dvoa_per
+		,eff_yards_per
+		,dyar_rush_per
+		,dvoa_rush_per
+		,eff_yards_rush_per
+		,fantasy_points
+		,fantasy_value_to_baseline_vbd
+		,fantasy_points_per
+		,fantasy_to_base_per
+		,qb_elo
+		,epa_pass
+		,epa_rush
+		,disruptions_allowed
+		,run_block_wins
+	FROM #temp_df_fa_offense_joined
+
+
+
+
+
+	INSERT INTO #temp_model_pro_market_value_inputs
+	SELECT unique_id
+		,nfl_player_id
+		,exclude_from_training
+		,predicted_all
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,0 AS position_blt_QB
+		,0 AS position_blt_RB
+		,0 AS position_blt_FB
+		,0 AS position_blt_WR
+		,0 AS position_blt_TE
+		,0 AS position_blt_OT
+		,0 AS position_blt_OG
+		,0 AS position_blt_OC
+		,position_blt_DL
+		,position_blt_OB
+		,position_blt_IB
+		,position_blt_DC
+		,position_blt_DS
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,close_on_ball_percentage
+		,completion_yards_against
+		,disruption_rate
+		,pbu_percentage
+		,run_defense_wins
+		,rush_yards_against
+		,stop_rate
+		,tackles_per_snap
+		,extra_tackles
+		,targetted_rate
+		,interception_rate
+		,completion_rate
+		,ISNULL(pressure_rate,0) AS pressure_rate
+		,ISNULL(sack_rate,0) AS sack_rate
+		,cpoe
+		,epa_coverage
+		,expected_points_allowed
+		,dpi_holdings
+		,receiver_grades
+		,NULL AS dyar_per
+		,NULL AS dvoa_per
+		,NULL AS eff_yards_per
+		,NULL AS dyar_rush_per
+		,NULL AS dvoa_rush_per
+		,NULL AS eff_yards_rush_per
+		,NULL AS fantasy_points
+		,NULL AS fantasy_value_to_baseline_vbd
+		,NULL AS fantasy_points_per
+		,NULL AS fantasy_to_base_per
+		,NULL AS qb_elo
+		,NULL AS epa_pass
+		,NULL AS epa_rush
+		,NULL AS disruptions_allowed
+		,NULL AS run_block_wins
+	FROM #temp_df_train_defense_joined
+
+
+
+
+
+
+	INSERT INTO #temp_model_pro_market_value_inputs
+	SELECT unique_id
+		,nfl_player_id
+		,exclude_from_training
+		,predicted_all
+		,true_apy_percent
+		,position_group
+		,position_blt
+		,0 AS position_blt_QB
+		,0 AS position_blt_RB
+		,0 AS position_blt_FB
+		,0 AS position_blt_WR
+		,0 AS position_blt_TE
+		,0 AS position_blt_OT
+		,0 AS position_blt_OG
+		,0 AS position_blt_OC
+		,position_blt_DL
+		,position_blt_OB
+		,position_blt_IB
+		,position_blt_DC
+		,position_blt_DS
+		,draft_number
+		,height_continuous
+		,[weight]
+		,age
+		,ten_yard_dash
+		,arm_length
+		,hand_span
+		,season
+		,transactions
+		,transaction_clubs
+		,grade_value
+		,pff_grade
+		,madden_rating
+		,free_agent_weeks
+		,injured_weeks
+		,suspended_weeks
+		,prop_off_def
+		,prop_off_def_inj
+		,prop_st
+		,equivalent_games_st_post
+		,equivalent_games_off_def_post
+		,last_grade_value
+		,last_pff_grade
+		,last_madden_rating
+		,years_since_last_played
+		,all_pro_awards
+		,all_pro_2_awards
+		,pro_bowl_awards
+		,player_of_the_week_awards
+		,position_salary_cummax
+		,close_on_ball_percentage
+		,completion_yards_against
+		,disruption_rate
+		,pbu_percentage
+		,run_defense_wins
+		,rush_yards_against
+		,stop_rate
+		,tackles_per_snap
+		,extra_tackles
+		,targetted_rate
+		,interception_rate
+		,completion_rate
+		,ISNULL(pressure_rate,0) AS pressure_rate
+		,ISNULL(sack_rate,0) AS sack_rate
+		,cpoe
+		,epa_coverage
+		,expected_points_allowed
+		,dpi_holdings
+		,receiver_grades
+		,NULL AS dyar_per
+		,NULL AS dvoa_per
+		,NULL AS eff_yards_per
+		,NULL AS dyar_rush_per
+		,NULL AS dvoa_rush_per
+		,NULL AS eff_yards_rush_per
+		,NULL AS fantasy_points
+		,NULL AS fantasy_value_to_baseline_vbd
+		,NULL AS fantasy_points_per
+		,NULL AS fantasy_to_base_per
+		,NULL AS qb_elo
+		,NULL AS epa_pass
+		,NULL AS epa_rush
+		,NULL AS disruptions_allowed
+		,NULL AS run_block_wins
+	FROM #temp_df_fa_defense_joined
+
+	--select *
+	--from AnalyticsDevelopment.dbo.model_pro_market_value_inputs
+
+	truncate table AnalyticsDevelopment.dbo.model_pro_market_value_inputs
+	insert into AnalyticsDevelopment.dbo.model_pro_market_value_inputs
+	select *
+	from #temp_model_pro_market_value_inputs
+
+	update AnalyticsDevelopment.dbo.model_pro_market_value_inputs
+	set prop_off_def = 1
+	where nfl_player_id = 46101
+	and season = 2022
+
+--	select *
+	--into AnalyticsDevelopment.dbo.model_pro_market_value_inputs_20221208
+	--from AnalyticsDevelopment.dbo.model_pro_market_value_inputs
